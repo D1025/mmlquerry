@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="CopilotDiffPersistence">
+    <option name="pendingDiffs">
+      <map>
+        <entry key="$PROJECT_DIR$/mizar-stack/src/main/resources/db/migration/pg/V2__attribute_counts.sql">
+          <value>
+            <PendingDiffInfo>
+              <option name="filePath" value="$PROJECT_DIR$/mizar-stack/src/main/resources/db/migration/pg/V2__attribute_counts.sql" />
+              <option name="originalContent" value="create table if not exists attribute_count (&#10;    document_version_id bigint primary key references document_version(id) on delete cascade,&#10;    attribute_definitions bigint not null,&#10;    counted_at timestamptz not null default now()&#10;);&#10;&#10;create index if not exists idx_attribute_count_counted_at on attribute_count(counted_at);&#10;" />
+              <option name="updatedContent" value="create table if not exists attribute_count (&#10;    document_version_id bigint primary key references document_version(id) on delete cascade,&#10;    attribute_definitions bigint not null,&#10;    counted_at timestamptz not null default now()&#10;);&#10;&#10;create index if not exists idx_attribute_count_counted_at on attribute_count(counted_at);&#10;" />
+            </PendingDiffInfo>
+          </value>
+        </entry>
+      </map>
+    </option>
+  </component>
+</project>

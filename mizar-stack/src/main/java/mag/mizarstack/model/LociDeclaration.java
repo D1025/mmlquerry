@@ -1,0 +1,41 @@
+package mag.mizarstack.model;
+
+import lombok.*;
+import org.dom4j.*;
+import mag.mizarstack.xml_names.*;
+
+@Setter
+@Getter
+@ToString
+
+public class LociDeclaration extends Item {
+
+    private QualifiedSegments qualifiedSegments;
+    private Conditions conditions;
+
+    public LociDeclaration(Element element) {
+        super(element);
+        qualifiedSegments = new QualifiedSegments(element.element(ESXElementName.QUALIFIED_SEGMENTS));
+        if (element.element(ESXElementName.CONDITIONS) != null) {
+            conditions = new Conditions(element.element(ESXElementName.CONDITIONS));
+        }
+    }
+
+    @Override
+    public void preProcess() {
+        super.preProcess();
+    }
+
+    @Override
+    public void process() {
+        qualifiedSegments.run();
+        if (conditions != null) {
+            conditions.run();
+        }
+    }
+
+    @Override
+    public void postProcess() {
+        super.postProcess();
+    }
+}

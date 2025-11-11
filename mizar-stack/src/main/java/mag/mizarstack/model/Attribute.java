@@ -1,0 +1,34 @@
+package mag.mizarstack.model;
+
+import lombok.*;
+import org.dom4j.*;
+import mag.mizarstack.xml_names.*;
+
+@Setter
+@Getter
+@ToString
+
+public class Attribute extends XMLElement implements SmallExpression {
+
+    private Arguments arguments;
+
+    public Attribute(Element element) {
+        super(element);
+        arguments = new Arguments(element.element(ESXElementName.ARGUMENTS));
+    }
+
+    @Override
+    public void preProcess() {
+        super.preProcess();
+    }
+
+    @Override
+    public void process() {
+        arguments.run();
+    }
+
+    @Override
+    public void postProcess() {
+        super.postProcess();
+    }
+}

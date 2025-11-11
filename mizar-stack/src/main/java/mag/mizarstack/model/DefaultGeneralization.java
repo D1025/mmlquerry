@@ -1,0 +1,34 @@
+package mag.mizarstack.model;
+
+import lombok.*;
+import org.dom4j.*;
+import mag.mizarstack.xml_names.*;
+
+@Setter
+@Getter
+@ToString
+
+public class DefaultGeneralization extends Item {
+
+    private QualifiedSegments qualifiedSegments;
+
+    public DefaultGeneralization(Element element) {
+        super(element);
+        qualifiedSegments = new QualifiedSegments(element.element(ESXElementName.QUALIFIED_SEGMENTS));
+    }
+
+    @Override
+    public void preProcess() {
+        super.preProcess();
+    }
+
+    @Override
+    public void process() {
+        qualifiedSegments.run();
+    }
+
+    @Override
+    public void postProcess() {
+        super.postProcess();
+    }
+}

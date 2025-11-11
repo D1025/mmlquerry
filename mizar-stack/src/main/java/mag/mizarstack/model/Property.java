@@ -1,0 +1,37 @@
+package mag.mizarstack.model;
+
+import lombok.*;
+import org.dom4j.*;
+import mag.mizarstack.xml_names.*;
+
+@Setter
+@Getter
+@ToString
+
+public class Property extends Item {
+
+    private Properties properties;
+    private Justification justification;
+
+    public Property(Element element) {
+        super(element);
+        properties = new Properties(element.element(ESXElementName.PROPERTIES));
+        justification = Justification.buildJustification(element.elements().get(1));
+    }
+
+    @Override
+    public void preProcess() {
+        super.preProcess();
+    }
+
+    @Override
+    public void process() {
+        properties.run();
+        justification.run();
+    }
+
+    @Override
+    public void postProcess() {
+        super.postProcess();
+    }
+}
