@@ -2,10 +2,10 @@ package mag.mizarstack.dao;
 
 import lombok.RequiredArgsConstructor;
 import mag.mizarstack.entity.IngestRun;
-import org.springframework.jdbc.core.simple.JdbcClient;
+import mag.mizarstack.repository.IngestRunRepository;
 import org.springframework.stereotype.Repository;
+import org.springframework.transaction.annotation.Transactional;
 
-import java.sql.Timestamp;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
@@ -17,111 +17,69 @@ import java.util.Optional;
 @RequiredArgsConstructor
 public class IngestRunDao {
 
-    private final JdbcClient db;
+    private final IngestRunRepository ingestRunRepository;
 
     /**
      * Find ingest run by ID.
      */
     public Optional<IngestRun> findById(Long id) {
-        return db.sql("""
-            SELECT id, started_at, finished_at, files_seen, files_downloaded, versions_added, bytes_downloaded
-            FROM ingest_run WHERE id = :id
-            """)
-                .param("id", id)
-                .query((rs, rowNum) -> mapRow(rs))
-                .optional();
+        return ingestRunRepository.findById(id);
     }
 
     /**
      * Find the latest ingest run.
      */
     public Optional<IngestRun> findLatest() {
-        return db.sql("""
-            SELECT id, started_at, finished_at, files_seen, files_downloaded, versions_added, bytes_downloaded
-            FROM ingest_run ORDER BY id DESC LIMIT 1
-            """)
-                .query((rs, rowNum) -> mapRow(rs))
-                .optional();
+        return ingestRunRepository.findTopByOrderByIdDesc();
     }
 
     /**
      * Create a new ingest run with default values.
      * Returns the new run ID.
      */
+    @Transactional
     public Long create() {
-        return db.sql("INSERT INTO ingest_run DEFAULT VALUES RETURNING id")
-                .query(Long.class)
-                .single();
+        IngestRun run = IngestRun.builder()
+                .startedAt(java.time.Instant.now())
+                .filesSeen(0)
+                .filesDownloaded(0)
+                .versionsAdded(0)
+                .bytesDownloaded(0L)
+                .build();
+        return ingestRunRepository.save(run).getId();
     }
 
     /**
      * Update ingest run statistics after completion.
      */
+    @Transactional
     public void complete(Long runId, int filesSeen, int filesDownloaded, int versionsAdded, long bytesDownloaded) {
-        db.sql("""
-            UPDATE ingest_run SET
-                finished_at = now(),
-                files_seen = :seen,
-                files_downloaded = :downloaded,
-                versions_added = :versions,
-                bytes_downloaded = :bytes
-            WHERE id = :id
-            """)
-                .params(paramMap(
-                        "id", runId,
-                        "seen", filesSeen,
-                        "downloaded", filesDownloaded,
-                        "versions", versionsAdded,
-                        "bytes", bytesDownloaded
-                ))
-                .update();
+        ingestRunRepository.findById(runId).ifPresent(run -> {
+            run.setFinishedAt(java.time.Instant.now());
+            run.setFilesSeen(filesSeen);
+            run.setFilesDownloaded(filesDownloaded);
+            run.setVersionsAdded(versionsAdded);
+            run.setBytesDownloaded(bytesDownloaded);
+            ingestRunRepository.save(run);
+        });
     }
 
     /**
      * Get summary of the latest run as a Map (for API responses).
      */
     public Map<String, Object> getLatestRunSummary() {
-        return db.sql("""
-            SELECT id, started_at, finished_at, files_seen, files_downloaded, versions_added, bytes_downloaded
-            FROM ingest_run ORDER BY id DESC LIMIT 1
-            """)
-                .query(rs -> {
-                    if (!rs.next()) {
-                        return Map.<String, Object>of("message", "no runs yet");
-                    }
+        return findLatest()
+                .<Map<String, Object>>map(run -> {
                     Map<String, Object> result = new HashMap<>();
-                    result.put("runId", rs.getLong("id"));
-                    result.put("startedAt", rs.getTimestamp("started_at"));
-                    result.put("finishedAt", rs.getTimestamp("finished_at"));
-                    result.put("filesSeen", rs.getInt("files_seen"));
-                    result.put("filesDownloaded", rs.getInt("files_downloaded"));
-                    result.put("versionsAdded", rs.getInt("versions_added"));
-                    result.put("bytesDownloaded", rs.getLong("bytes_downloaded"));
+                    result.put("runId", run.getId());
+                    result.put("startedAt", run.getStartedAt());
+                    result.put("finishedAt", run.getFinishedAt());
+                    result.put("filesSeen", run.getFilesSeen());
+                    result.put("filesDownloaded", run.getFilesDownloaded());
+                    result.put("versionsAdded", run.getVersionsAdded());
+                    result.put("bytesDownloaded", run.getBytesDownloaded());
                     return result;
-                });
-    }
-
-    private IngestRun mapRow(java.sql.ResultSet rs) throws java.sql.SQLException {
-        Timestamp sa = rs.getTimestamp("started_at");
-        Timestamp fa = rs.getTimestamp("finished_at");
-        return IngestRun.builder()
-                .id(rs.getLong("id"))
-                .startedAt(sa != null ? sa.toInstant() : null)
-                .finishedAt(fa != null ? fa.toInstant() : null)
-                .filesSeen(rs.getInt("files_seen"))
-                .filesDownloaded(rs.getInt("files_downloaded"))
-                .versionsAdded(rs.getInt("versions_added"))
-                .bytesDownloaded(rs.getLong("bytes_downloaded"))
-                .build();
-    }
-
-    private static Map<String, Object> paramMap(Object... kv) {
-        Map<String, Object> m = new HashMap<>();
-        for (int i = 0; i < kv.length; i += 2) {
-            String key = (String) kv[i];
-            Object val = (i + 1) < kv.length ? kv[i + 1] : null;
-            m.put(key, val);
-        }
-        return m;
+                })
+                .orElseGet(() -> Map.of("message", "no runs yet"));
     }
 }

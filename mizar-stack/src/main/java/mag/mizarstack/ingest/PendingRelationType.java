@@ -1,0 +1,9 @@
+package mag.mizarstack.ingest;
+
+enum PendingRelationType {
+    ITEM_CONSTRUCTOR_REF,
+    NOTATION_CONSTRUCTOR,
+    CONSTRUCTOR_DEFINITION,
+    CONSTRUCTOR_DEFINIENS,
+    REGISTRATION_RELATION
+}

@@ -2,8 +2,9 @@ package mag.mizarstack.dao;
 
 import lombok.RequiredArgsConstructor;
 import mag.mizarstack.entity.Document;
-import org.springframework.jdbc.core.simple.JdbcClient;
+import mag.mizarstack.repository.DocumentRepository;
 import org.springframework.stereotype.Repository;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.util.Optional;
@@ -15,73 +16,55 @@ import java.util.Optional;
 @RequiredArgsConstructor
 public class DocumentDao {
 
-    private final JdbcClient db;
+    private final DocumentRepository documentRepository;
 
     /**
      * Find document by ID.
      */
     public Optional<Document> findById(Long id) {
-        return db.sql("SELECT id, source_url, created_at FROM document WHERE id = :id")
-                .param("id", id)
-                .query((rs, rowNum) -> Document.builder()
-                        .id(rs.getLong("id"))
-                        .sourceUrl(rs.getString("source_url"))
-                        .createdAt(rs.getTimestamp("created_at").toInstant())
-                        .build())
-                .optional();
+        return documentRepository.findById(id);
     }
 
     /**
      * Find document by source URL.
      */
     public Optional<Document> findBySourceUrl(String sourceUrl) {
-        return db.sql("SELECT id, source_url, created_at FROM document WHERE source_url = :url")
-                .param("url", sourceUrl)
-                .query((rs, rowNum) -> Document.builder()
-                        .id(rs.getLong("id"))
-                        .sourceUrl(rs.getString("source_url"))
-                        .createdAt(rs.getTimestamp("created_at").toInstant())
-                        .build())
-                .optional();
+        return documentRepository.findBySourceUrl(sourceUrl);
     }
 
     /**
      * Insert or update a document (upsert on source_url conflict).
      * Returns the document ID.
      */
+    @Transactional
     public Long upsert(String sourceUrl) {
-        return db.sql("""
-            INSERT INTO document(source_url) VALUES(:url)
-            ON CONFLICT (source_url) DO UPDATE SET source_url = excluded.source_url
-            RETURNING id
-            """)
-                .param("url", sourceUrl)
-                .query(Long.class)
-                .single();
+        return documentRepository.findBySourceUrl(sourceUrl)
+                .map(Document::getId)
+                .orElseGet(() -> {
+                    Document created = Document.builder()
+                            .sourceUrl(sourceUrl)
+                            .createdAt(Instant.now())
+                            .build();
+                    return documentRepository.save(created).getId();
+                });
     }
 
     /**
      * Insert a new document with explicit values.
      * Returns the inserted document.
      */
+    @Transactional
     public Document insert(String sourceUrl) {
-        Long id = db.sql("INSERT INTO document(source_url) VALUES(:url) RETURNING id")
-                .param("url", sourceUrl)
-                .query(Long.class)
-                .single();
-        return Document.builder()
-                .id(id)
+        return documentRepository.save(Document.builder()
                 .sourceUrl(sourceUrl)
                 .createdAt(Instant.now())
-                .build();
+                .build());
     }
 
     /**
      * Count all documents.
      */
     public long count() {
-        return db.sql("SELECT COUNT(*) FROM document")
-                .query(Long.class)
-                .single();
+        return documentRepository.count();
     }
 }

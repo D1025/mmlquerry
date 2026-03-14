@@ -2,7 +2,6 @@ package mag.mizarstack.ingest;
 
 import lombok.extern.slf4j.Slf4j;
 import org.dom4j.Element;
-import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
 
 import java.io.ByteArrayInputStream;
@@ -22,11 +21,29 @@ public class EsxMmlMapperService {
 
     // Prefer exact-case match used in ESX files (<Item ...>)
     private static final String ITEM_XPATH = "//Item";
+    private static final Set<String> DEFINITION_ITEM_KINDS = Set.of(
+            "Attribute-Definition",
+            "Functor-Definition",
+            "Predicate-Definition",
+            "Structure-Definition",
+            "Mode-Definition"
+    );
+    private static final Set<String> NOTATION_PATTERN_NAMES = Set.of(
+            "Attribute-Pattern",
+            "Mode-Pattern",
+            "Predicate-Pattern",
+            "Structure-Pattern",
+            "SelectorFunctor-Pattern",
+            "InfixFunctor-Pattern",
+            "ForgetfulFunctor-Pattern",
+            "AggregateFunctor-Pattern",
+            "Strict-Pattern"
+    );
 
-    private final JdbcClient db;
+    private final EsxMmlJpaDao mmlDao;
 
-    public EsxMmlMapperService(JdbcClient db) {
-        this.db = db;
+    public EsxMmlMapperService(EsxMmlJpaDao mmlDao) {
+        this.mmlDao = mmlDao;
     }
 
     public Map<String, Object> processArticleXml(byte[] xmlBytes, String s3Key) {
@@ -54,7 +71,7 @@ public class EsxMmlMapperService {
 
         // libId -> mml_item.id
         Map<String, UUID> libIdToItem = new ConcurrentHashMap<>();
-        List<PendingRef> pendingRefs = Collections.synchronizedList(new ArrayList<>());
+        List<PendingRelation> pendingRelations = Collections.synchronizedList(new ArrayList<>());
 
         final List<String> finalMessages = (messages == null) ? new ArrayList<>() : messages;
 
@@ -84,32 +101,43 @@ public class EsxMmlMapperService {
             // Streaming SAX ingestion that is namespace/case safe.
             // We extract each <Item> subtree as XML and map it to DB.
             ingestItemsSax(xmlBytes, s3Key, currentArticleId, currentArticleName,
-                    parsedItems, libIdToItem, pendingRefs, m);
+                    parsedItems, libIdToItem, pendingRelations, m);
 
             if (parsedItems.get() == 0) {
                 detectLikelyItemElements(xmlBytes, m);
             }
 
-            m.accept("Parsing complete: totalItems=" + parsedItems.get() + " pendingRefs=" + pendingRefs.size());
+            m.accept("Parsing complete: totalItems=" + parsedItems.get() + " pendingRelations=" + pendingRelations.size());
 
             AtomicInteger resolvedRefs = new AtomicInteger(0);
-            int total = pendingRefs.size();
-            m.accept("Resolving pending references: " + total);
+            int total = pendingRelations.size();
+            m.accept("Resolving pending relations: " + total);
 
-            for (PendingRef pr : pendingRefs) {
-                UUID citem = libIdToItem.get(pr.refLibId);
-                if (citem == null) {
-                    citem = findConstructorItemIdByLibId(pr.refLibId);
+            for (PendingRelation pending : pendingRelations) {
+                UUID constructorItemId = libIdToItem.get(pending.constructorLibId);
+                if (constructorItemId == null) {
+                    constructorItemId = findConstructorItemIdByLibId(pending.constructorLibId);
                 }
-                if (citem != null) {
-                    insertItemConstructorRef(pr.itemId, citem, pr.role, true, 1, null);
-                    int r = resolvedRefs.incrementAndGet();
-                    if (r % 500 == 0) m.accept("Resolved refs: " + r + " / " + total);
+                if (constructorItemId == null) continue;
+
+                switch (pending.type) {
+                    case ITEM_CONSTRUCTOR_REF ->
+                            insertItemConstructorRef(pending.sourceItemId, constructorItemId, pending.role, pending.isPositive, pending.occurrences, pending.details);
+                    case NOTATION_CONSTRUCTOR ->
+                            insertNotationConstructor(pending.sourceItemId, constructorItemId, pending.role);
+                    case CONSTRUCTOR_DEFINITION ->
+                            insertConstructorDefinition(constructorItemId, pending.sourceItemId);
+                    case CONSTRUCTOR_DEFINIENS ->
+                            insertConstructorDefiniens(pending.sourceItemId, constructorItemId);
+                    case REGISTRATION_RELATION ->
+                            insertRegistrationRelation(pending.sourceItemId, constructorItemId, pending.role, pending.isPositive);
                 }
+                int r = resolvedRefs.incrementAndGet();
+                if (r % 500 == 0) m.accept("Resolved relations: " + r + " / " + total);
             }
 
             m.accept("Resolving complete: resolved=" + resolvedRefs.get()
-                    + " unresolved=" + (pendingRefs.size() - resolvedRefs.get()));
+                    + " unresolved=" + (pendingRelations.size() - resolvedRefs.get()));
 
         } catch (Exception e) {
             log.warn("Error while mapping ESX XML", e);
@@ -121,7 +149,7 @@ public class EsxMmlMapperService {
 
         return Map.of(
                 "processedItems", parsedItems.get(),
-                "pendingRefs", pendingRefs.size(),
+                "pendingRefs", pendingRelations.size(),
                 "messages", finalMessages
         );
     }
@@ -133,7 +161,7 @@ public class EsxMmlMapperService {
             AtomicReference<String> currentArticleName,
             AtomicInteger parsedItems,
             Map<String, UUID> libIdToItem,
-            List<PendingRef> pendingRefs,
+            List<PendingRelation> pendingRelations,
             java.util.function.Consumer<String> m
     ) throws Exception {
         javax.xml.parsers.SAXParserFactory f = javax.xml.parsers.SAXParserFactory.newInstance();
@@ -233,25 +261,33 @@ public class EsxMmlMapperService {
                                 currentArticleId.set(articleId);
                             }
 
-                            MmlItem it = extractItem(itemEl, articleName);
-                            UUID itemId = upsertMmlItem(articleId, it);
+                            MappedMmlItem statementItem = extractItem(itemEl, articleName);
+                            UUID statementItemId = upsertMmlItem(articleId, statementItem);
 
-                            if (it.libId != null && !it.libId.isBlank()) {
-                                libIdToItem.put(it.libId, itemId);
+                            if (statementItem.libId != null && !statementItem.libId.isBlank()) {
+                                libIdToItem.put(statementItem.libId, statementItemId);
                             }
 
                             try {
-                                insertStatement(itemId, normalizeStatementKind(it.subKind), it.textContent);
+                                insertStatement(statementItemId, normalizeStatementKind(statementItem.subKind), statementItem.textContent);
                             } catch (Exception ignore) {}
 
                             List<String> references = findConstructorLibIds(itemEl);
                             for (String rlib : references) {
-                                pendingRefs.add(new PendingRef(itemId, rlib, "ref"));
+                                pendingRelations.add(PendingRelation.itemConstructorRef(statementItemId, rlib, "ref", true, 1, null));
+                            }
+
+                            String itemKind = Optional.ofNullable(itemEl.attributeValue("kind")).orElse("");
+                            if (isDefinitionItemKind(itemKind)) {
+                                processDefinitionItem(itemEl, itemKind, articleId, articleName, statementItemId, libIdToItem, pendingRelations);
+                            }
+                            if (isClusterItemKind(itemKind)) {
+                                processRegistrationItem(itemEl, articleId, articleName, libIdToItem, pendingRelations);
                             }
 
                             int count = parsedItems.incrementAndGet();
                             if (count == 1) {
-                                m.accept("First item seen: elementName=Item kind=" + it.kind + " subkind=" + it.subKind + " number=" + it.number + " libId=" + it.libId);
+                                m.accept("First item seen: elementName=Item kind=" + statementItem.kind + " subkind=" + statementItem.subKind + " number=" + statementItem.number + " libId=" + statementItem.libId);
                             }
                             if (count % 200 == 0) m.accept("Processed items: " + count);
 
@@ -378,189 +414,334 @@ public class EsxMmlMapperService {
         return false;
     }
 
-    private static class StopDetect extends RuntimeException {
-    }
-
     // -------------------- DB: Article --------------------
 
     private UUID upsertArticle(String articleName, String s3Key, String xmlContent) {
-        var params = Map.of("name", articleName, "file_path", s3Key, "xml", xmlContent);
-        try {
-            return db.sql("""
-                    insert into article(id, name, file_path, xml_content)
-                    values (gen_random_uuid(), :name, :file_path, :xml)
-                    on conflict (name) do update set
-                        file_path = excluded.file_path,
-                        xml_content = excluded.xml_content
-                    returning id
-                """)
-                    .params(params)
-                    .query(UUID.class)
-                    .single();
-        } catch (Exception ex) {
-            log.warn("Article upsert failed, falling back to select: {}", ex.getMessage());
-            String idStr = db.sql("select id from article where name=:name")
-                    .param("name", articleName)
-                    .query(String.class)
-                    .single();
-            return UUID.fromString(idStr);
-        }
+        return mmlDao.upsertArticle(articleName, s3Key, xmlContent);
     }
 
     // -------------------- DB: Items (UPSERT) --------------------
 
-    /**
-     * Upsert by UNIQUE(article_id, subkind, number) to make ingestion idempotent.
-     * If subkind is null, Postgres allows duplicates (NULL != NULL), so you may still get duplicates for such items.
-     * The important ones (th/def/dfs/sch, constructors, notations) usually have non-null subkind + stable number.
-     */
-    private UUID upsertMmlItem(UUID articleId, MmlItem it) {
-        var params = new HashMap<String, Object>();
-        params.put("articleId", articleId);
-        params.put("kind", it.kind);
-        params.put("subkind", it.subKind);
-        params.put("number", it.number);
-        params.put("lib_id", it.libId);
-        params.put("title", it.title);
-        params.put("text_content", it.textContent);
-        params.put("raw_xml", it.rawXml);
-
-        try {
-            return db.sql("""
-                insert into mml_item (id, article_id, kind, subkind, number, lib_id, title, text_content, raw_xml)
-                values (gen_random_uuid(), :articleId, :kind, :subkind, :number, :lib_id, :title, :text_content, :raw_xml)
-                on conflict (article_id, subkind, number)
-                do update set
-                    kind = excluded.kind,
-                    lib_id = excluded.lib_id,
-                    title = excluded.title,
-                    text_content = excluded.text_content,
-                    raw_xml = excluded.raw_xml
-                returning id
-                """)
-                .params(params)
-                .query(UUID.class)
-                .single();
-        } catch (org.springframework.dao.DataIntegrityViolationException dive) {
-            // Most common: UNIQUE(lib_id) violation (idx_mml_item_lib_id_unique) when our (article_id,subkind,number)
-            // doesn't match, but lib_id already exists.
-            if (it.libId == null || it.libId.isBlank()) throw dive;
-
-            log.debug("mml_item upsert: conflict on lib_id={}, falling back to update-by-lib_id", it.libId);
-            List<UUID> existing = db.sql("select id from mml_item where lib_id = :lib")
-                    .param("lib", it.libId)
-                    .query(UUID.class)
-                    .list();
-            if (existing.isEmpty()) throw dive;
-
-            UUID id = existing.get(0);
-
-            // Important: keep (article_id, subkind, number) stable to avoid violating UNIQUE(article_id, subkind, number)
-            // when the same lib_id appeared under a different key.
-            db.sql("""
-                    update mml_item
-                    set kind = :kind,
-                        title = :title,
-                        text_content = :text_content,
-                        raw_xml = :raw_xml
-                    where id = :id
-                    """)
-                    .params(new HashMap<>() {{
-                        putAll(params);
-                        put("id", id);
-                    }})
-                    .update();
-
-            // If additionally there is already a canonical row for (articleId, subkind, number), prefer it.
-            // This prevents scattering duplicates when upstream numbering is noisy.
-            if (it.subKind != null && !it.subKind.isBlank() && it.number > 0) {
-                List<UUID> canonical = db.sql("""
-                        select id from mml_item
-                        where article_id = :aid and subkind = :sk and number = :nr
-                        """)
-                        .params(Map.of("aid", articleId, "sk", it.subKind, "nr", it.number))
-                        .query(UUID.class)
-                        .list();
-                if (!canonical.isEmpty()) {
-                    return canonical.get(0);
-                }
-            }
-
-            return id;
-        }
+    private UUID upsertMmlItem(UUID articleId, MappedMmlItem it) {
+        return mmlDao.upsertMmlItem(articleId, it);
     }
 
     private void insertConstructor(UUID itemId, String constructorKind, String shortName) {
-        if (constructorKind == null || constructorKind.isBlank()) return;
-        db.sql("""
-                insert into constructor(item_id, constructor_kind, short_name)
-                values(:id, :ck, :sn)
-                on conflict (item_id) do nothing
-                """)
-                .params(Map.of("id", itemId, "ck", constructorKind, "sn", shortName))
-                .update();
+        mmlDao.insertConstructor(itemId, constructorKind, shortName);
     }
 
     private void insertNotation(UUID itemId, UUID articleId, String notationKind) {
-        if (notationKind == null || notationKind.isBlank()) return;
-        db.sql("""
-                insert into notation(item_id, notation_kind)
-                values(:id, :nk)
-                on conflict (item_id) do nothing
-                """)
-                .params(Map.of("id", itemId, "nk", notationKind))
-                .update();
+        mmlDao.insertNotation(itemId, notationKind);
     }
 
     private void insertStatement(UUID itemId, String statementKind, String text) {
-        if (statementKind == null || statementKind.isBlank()) statementKind = "th";
-        db.sql("""
-                insert into statement(item_id, statement_kind, statement_text)
-                values(:id, :sk, :text)
-                on conflict (item_id) do nothing
-                """)
-                .params(Map.of("id", itemId, "sk", statementKind, "text", text))
-                .update();
+        mmlDao.insertStatement(itemId, statementKind, text);
     }
 
     private void insertRegistration(UUID itemId, String regKind) {
-        if (regKind == null || regKind.isBlank()) regKind = "condreg";
-        db.sql("""
-                insert into registration(item_id, registration_kind)
-                values(:id, :rk)
-                on conflict (item_id) do nothing
-                """)
-                .params(Map.of("id", itemId, "rk", regKind))
-                .update();
+        mmlDao.insertRegistration(itemId, regKind);
     }
 
     private void insertItemConstructorRef(UUID itemId, UUID constructorItemId, String role, boolean isPositive, int occurrences, Map<String, Object> details) {
-        if (!constructorExists(constructorItemId)) {
-            // Avoid FK violation; unresolved will stay unresolved until constructors are ingested.
-            return;
-        }
-        Map<String, Object> p = new HashMap<>();
-        p.put("id", UUID.randomUUID());
-        p.put("item_id", itemId);
-        p.put("constructor_item_id", constructorItemId);
-        p.put("role", role);
-        p.put("is_positive", isPositive);
-        p.put("occurrences", occurrences);
-        p.put("details", details);
+        mmlDao.insertItemConstructorRef(itemId, constructorItemId, role, isPositive, occurrences, details);
+    }
 
-        db.sql("""
-                insert into item_constructor_ref (id, item_id, constructor_item_id, role, is_positive, occurrences, details)
-                values(:id, :item_id, :constructor_item_id, :role, :is_positive, :occurrences, :details)
-                on conflict (id) do nothing
-                """)
-                .params(p)
-                .update();
+    private void insertNotationFormat(UUID notationItemId, UUID formatId) {
+        mmlDao.insertNotationFormat(notationItemId, formatId);
+    }
+
+    private void insertFormatSymbol(UUID formatId, UUID symbolId, int pos) {
+        mmlDao.insertFormatSymbol(formatId, symbolId, pos);
+    }
+
+    private void insertConstructorDefinition(UUID constructorItemId, UUID definitionStatementItemId) {
+        mmlDao.insertConstructorDefinition(constructorItemId, definitionStatementItemId);
+    }
+
+    private void insertConstructorDefiniens(UUID definiensStatementItemId, UUID constructorItemId) {
+        mmlDao.insertConstructorDefiniens(definiensStatementItemId, constructorItemId);
+    }
+
+    private void insertRegistrationRelation(UUID registrationItemId, UUID constructorItemId, String role, boolean isPositive) {
+        mmlDao.insertRegistrationRelation(registrationItemId, constructorItemId, role, isPositive);
+    }
+
+    private boolean isDefinitionItemKind(String itemKind) {
+        return itemKind != null && DEFINITION_ITEM_KINDS.contains(itemKind);
+    }
+
+    private boolean isClusterItemKind(String itemKind) {
+        return "Cluster".equals(itemKind);
+    }
+
+    private void processDefinitionItem(
+            Element itemEl,
+            String itemKind,
+            UUID articleId,
+            String articleName,
+            UUID statementItemId,
+            Map<String, UUID> libIdToItem,
+            List<PendingRelation> pendingRelations
+    ) {
+        Element definitionEl = firstDirectChildByName(itemEl, itemKind);
+        if (definitionEl == null) return;
+
+        String constructorKind = constructorKindFromDefinitionName(itemKind);
+        String constructorLibId = extractDefinitionConstructorLibId(definitionEl, articleName);
+
+        if (constructorKind != null && constructorLibId != null && !constructorLibId.isBlank()) {
+            MappedMmlItem constructorItem = buildSpecializedItem(definitionEl, "constructor", constructorKind, constructorLibId, articleName);
+            UUID constructorItemId = upsertMmlItem(articleId, constructorItem);
+            insertConstructor(constructorItemId, constructorKind, constructorItem.shortName);
+            libIdToItem.put(constructorLibId, constructorItemId);
+
+            if (definitionEl.selectSingleNode("./Definiens") != null || definitionEl.selectSingleNode(".//Definiens") != null) {
+                pendingRelations.add(PendingRelation.constructorDefinition(statementItemId, constructorLibId));
+                pendingRelations.add(PendingRelation.constructorDefiniens(statementItemId, constructorLibId));
+            }
+        }
+
+        List<Element> patternElements = findNotationPatternElements(definitionEl);
+        for (Element patternEl : patternElements) {
+            processNotationPattern(patternEl, articleId, articleName, constructorLibId, libIdToItem, pendingRelations);
+        }
+    }
+
+    private void processRegistrationItem(
+            Element itemEl,
+            UUID articleId,
+            String articleName,
+            Map<String, UUID> libIdToItem,
+            List<PendingRelation> pendingRelations
+    ) {
+        Element clusterEl = firstDirectChildByName(itemEl, "Cluster");
+        if (clusterEl == null) return;
+
+        Element registrationEl = null;
+        for (Iterator<?> it = clusterEl.elementIterator(); it.hasNext(); ) {
+            Object o = it.next();
+            if (!(o instanceof Element e)) continue;
+            String n = e.getName();
+            if (equalsAnyIgnoreCase(n, "Conditional-Registration", "Existential-Registration", "Functorial-Registration")) {
+                registrationEl = e;
+                break;
+            }
+        }
+        if (registrationEl == null) return;
+
+        String regKind = registrationKindFromElementName(registrationEl.getName());
+        String regLibId = buildRegistrationLibId(articleName, regKind, registrationEl.attributeValue("xmlid"));
+
+        MappedMmlItem regItem = buildSpecializedItem(registrationEl, "registration", regKind, regLibId, articleName);
+        UUID registrationItemId = upsertMmlItem(articleId, regItem);
+        insertRegistration(registrationItemId, normalizeRegistrationKind(regKind));
+        if (regItem.libId != null && !regItem.libId.isBlank()) {
+            libIdToItem.put(regItem.libId, registrationItemId);
+        }
+
+        List<org.dom4j.Node> refNodes = registrationEl.selectNodes(".//*[@absoluteconstrMMLId]");
+        for (org.dom4j.Node n : refNodes) {
+            if (!(n instanceof Element refEl)) continue;
+            String constructorLibId = refEl.attributeValue("absoluteconstrMMLId");
+            if (constructorLibId == null || constructorLibId.isBlank()) continue;
+            String role = deriveRegistrationRole(refEl);
+            boolean isPositive = !isNegativeReference(refEl);
+            pendingRelations.add(PendingRelation.registrationRelation(registrationItemId, constructorLibId, role, isPositive));
+        }
+    }
+
+    private MappedMmlItem buildSpecializedItem(Element sourceEl, String kind, String subKind, String libId, String articleName) {
+        MappedMmlItem it = new MappedMmlItem();
+        it.kind = kind;
+        it.subKind = subKind;
+        it.libId = libId;
+        it.shortName = sourceEl.attributeValue("idnr");
+        it.title = firstNonBlank(sourceEl.attributeValue("spelling"), sourceEl.attributeValue("idnr"), sourceEl.getName());
+        it.textContent = extractTextContent(sourceEl);
+        it.rawXml = sourceEl.asXML();
+
+        int fromLib = parseTrailingNumberFromLibId(libId);
+        int fromNode = findNumber(sourceEl);
+        it.number = (fromLib > 0) ? fromLib : fromNode;
+
+        if ((it.libId == null || it.libId.isBlank()) && articleName != null && !articleName.isBlank()) {
+            String xmlid = sourceEl.attributeValue("xmlid");
+            if (xmlid != null && !xmlid.isBlank()) {
+                it.libId = articleName + ":" + subKind + ":" + xmlid;
+            }
+        }
+        return it;
+    }
+
+    private String extractDefinitionConstructorLibId(Element definitionEl, String articleName) {
+        String mmlId = definitionEl.attributeValue("MMLId");
+        if (mmlId != null && !mmlId.isBlank()) return mmlId;
+
+        List<org.dom4j.Node> nodes = definitionEl.selectNodes(".//*[@absoluteconstrMMLId]");
+        for (org.dom4j.Node n : nodes) {
+            if (!(n instanceof Element e)) continue;
+            String lib = e.attributeValue("absoluteconstrMMLId");
+            if (lib == null || lib.isBlank()) continue;
+            if (isLocalLibId(lib, articleName)) return lib;
+        }
+        return null;
+    }
+
+    private List<Element> findNotationPatternElements(Element root) {
+        List<Element> out = new ArrayList<>();
+        List<org.dom4j.Node> all = root.selectNodes(".//*");
+        for (org.dom4j.Node n : all) {
+            if (n instanceof Element e && NOTATION_PATTERN_NAMES.contains(e.getName())) {
+                out.add(e);
+            }
+        }
+        return out;
+    }
+
+    private void processNotationPattern(
+            Element patternEl,
+            UUID articleId,
+            String articleName,
+            String fallbackConstructorLibId,
+            Map<String, UUID> libIdToItem,
+            List<PendingRelation> pendingRelations
+    ) {
+        String patternLibId = firstNonBlank(patternEl.attributeValue("absolutepatternMMLId"), patternEl.attributeValue("MMLId"));
+        if (patternLibId == null || patternLibId.isBlank()) return;
+
+        String notationKind = notationKindFromPatternName(patternEl.getName());
+        String notationLibId = buildNotationLibId(patternLibId, patternEl.getName(), patternEl.attributeValue("xmlid"));
+        MappedMmlItem notationItem = buildSpecializedItem(patternEl, "notation", notationKind, notationLibId, articleName);
+
+        UUID notationItemId = upsertMmlItem(articleId, notationItem);
+        insertNotation(notationItemId, articleId, normalizeNotationKind(notationKind, patternEl));
+        if (notationItem.libId != null && !notationItem.libId.isBlank()) {
+            libIdToItem.put(notationItem.libId, notationItemId);
+        }
+
+        processNotationChildren(patternEl, notationItemId, articleId, libIdToItem, pendingRelations, fallbackConstructorLibId);
+    }
+
+    private String constructorKindFromDefinitionName(String definitionName) {
+        if (definitionName == null) return null;
+        String lower = definitionName.toLowerCase(Locale.ROOT);
+        if (lower.contains("attribute")) return "attr";
+        if (lower.contains("functor")) return "func";
+        if (lower.contains("predicate")) return "pred";
+        if (lower.contains("mode")) return "mode";
+        if (lower.contains("structure")) return "struct";
+        if (lower.contains("selector")) return "sel";
+        if (lower.contains("aggregate")) return "aggr";
+        return null;
+    }
+
+    private String notationKindFromPatternName(String patternName) {
+        if (patternName == null) return "funcnot";
+        String lower = patternName.toLowerCase(Locale.ROOT);
+        if (lower.contains("attribute") || lower.contains("strict")) return "attrnot";
+        if (lower.contains("mode")) return "modenot";
+        if (lower.contains("predicate")) return "prednot";
+        if (lower.contains("selector")) return "selnot";
+        if (lower.contains("structure")) return "structnot";
+        if (lower.contains("aggregate")) return "aggrnot";
+        return "funcnot";
+    }
+
+    private String registrationKindFromElementName(String elementName) {
+        if (elementName == null) return "condreg";
+        return switch (elementName.toLowerCase(Locale.ROOT)) {
+            case "existential-registration" -> "exreg";
+            case "functorial-registration" -> "funcreg";
+            default -> "condreg";
+        };
+    }
+
+    private String deriveRegistrationRole(Element refEl) {
+        Element adjectiveCluster = nearestAncestor(refEl, "Adjective-Cluster");
+        if (adjectiveCluster != null) {
+            String role = adjectiveCluster.attributeValue("role");
+            if (role != null && !role.isBlank()) return role.toLowerCase(Locale.ROOT);
+            return "cluster";
+        }
+        if (hasAncestor(refEl, "Clustered-Type")) return "basetype";
+        return "cluster";
+    }
+
+    private boolean isNegativeReference(Element el) {
+        return isTrue(el.attributeValue("nonocc")) || isTrue(el.attributeValue("antonymic"));
+    }
+
+    private static boolean isTrue(String v) {
+        return v != null && ("true".equalsIgnoreCase(v) || "1".equals(v));
+    }
+
+    private Element nearestAncestor(Element start, String ancestorName) {
+        Element parent = (start == null) ? null : start.getParent();
+        while (parent != null) {
+            if (parent.getName().equalsIgnoreCase(ancestorName)) return parent;
+            parent = parent.getParent();
+        }
+        return null;
+    }
+
+    private boolean hasAncestor(Element start, String ancestorName) {
+        return nearestAncestor(start, ancestorName) != null;
+    }
+
+    private static String buildNotationLibId(String patternLibId, String patternName, String xmlid) {
+        String suffix = (xmlid == null || xmlid.isBlank()) ? (patternName == null ? "pattern" : patternName) : xmlid;
+        return "pattern:" + patternLibId + ":" + suffix;
+    }
+
+    private static String buildRegistrationLibId(String articleName, String regKind, String xmlid) {
+        String suffix = (xmlid == null || xmlid.isBlank()) ? "reg" : xmlid;
+        return articleName + ":" + regKind + ":" + suffix;
+    }
+
+    private static String firstNonBlank(String... values) {
+        if (values == null) return null;
+        for (String v : values) {
+            if (v != null && !v.isBlank()) return v;
+        }
+        return null;
+    }
+
+    private static int parseTrailingNumberFromLibId(String libId) {
+        if (libId == null || libId.isBlank()) return 0;
+        String tail = libId;
+        int idx = libId.lastIndexOf(':');
+        if (idx >= 0 && idx + 1 < libId.length()) {
+            tail = libId.substring(idx + 1);
+        }
+        String digits = tail.replaceAll("\\D+", "");
+        if (digits.isBlank()) return 0;
+        try {
+            return Integer.parseInt(digits);
+        } catch (Exception ignore) {
+            return 0;
+        }
+    }
+
+    private static boolean isLocalLibId(String libId, String articleName) {
+        if (libId == null || articleName == null) return false;
+        return libId.toUpperCase(Locale.ROOT).startsWith(articleName.toUpperCase(Locale.ROOT) + ":");
+    }
+
+    private Element firstDirectChildByName(Element parent, String childName) {
+        if (parent == null || childName == null || childName.isBlank()) return null;
+        for (Iterator<?> it = parent.elementIterator(); it.hasNext(); ) {
+            Object o = it.next();
+            if (o instanceof Element e && e.getName().equalsIgnoreCase(childName)) {
+                return e;
+            }
+        }
+        return null;
     }
 
     // -------------------- Extraction --------------------
 
-    private MmlItem extractItem(Element itemEl, String articleName) {
-        MmlItem it = new MmlItem();
+    private MappedMmlItem extractItem(Element itemEl, String articleName) {
+        MappedMmlItem it = new MappedMmlItem();
         it.kind = guessItemKind(itemEl);
 
         if ("notation".equals(it.kind)) {
@@ -594,15 +775,21 @@ public class EsxMmlMapperService {
             } catch (Exception ignore) {}
         }
 
-        Element label = (Element) itemEl.selectSingleNode(".//Label[@labelnr]");
-        if (label != null) {
-            String labelnr = label.attributeValue("labelnr");
-            if (labelnr != null) {
-                try {
-                    int v = Integer.parseInt(labelnr);
-                    // labelnr=0 występuje masowo; nie jest stabilnym numerem bibliotecznym
-                    if (v > 0) return v;
-                } catch (Exception ignore) {}
+        String ownLibId = findOwnMmlId(itemEl);
+        int fromLib = parseTrailingNumberFromLibId(ownLibId);
+        if (fromLib > 0) return fromLib;
+
+        boolean hasOwnLibId = ownLibId != null && !ownLibId.isBlank();
+        if (hasOwnLibId) {
+            Element label = (Element) itemEl.selectSingleNode(".//Label[@labelnr]");
+            if (label != null) {
+                String labelnr = label.attributeValue("labelnr");
+                if (labelnr != null) {
+                    try {
+                        int v = Integer.parseInt(labelnr);
+                        if (v > 0) return v;
+                    } catch (Exception ignore) {}
+                }
             }
         }
 
@@ -610,13 +797,16 @@ public class EsxMmlMapperService {
         if (xmlid != null) {
             String digits = xmlid.replaceAll("\\D+", "");
             if (!digits.isBlank()) {
-                try { return Integer.parseInt(digits); } catch (Exception ignore) {}
+                try {
+                    int v = Integer.parseInt(digits);
+                    if (hasOwnLibId) return v;
+                    return 1_000_000 + v;
+                } catch (Exception ignore) {}
             }
         }
 
         return 0;
     }
-
     private String guessItemKind(Element itemEl) {
         // In ESX, <Item kind="Regular-Statement"> etc. Only statements are wrapped in <Item>.
         // Constructors/notations/registrations exist as nested elements.
@@ -731,39 +921,22 @@ public class EsxMmlMapperService {
     }
 
     private UUID findConstructorItemIdByLibId(String libId) {
-        if (libId == null) return null;
-        // FK in item_constructor_ref points to constructor(item_id), not just any mml_item.
-        List<UUID> row = db.sql("""
-                select c.item_id
-                from constructor c
-                join mml_item mi on mi.id = c.item_id
-                where mi.lib_id = :lib
-                """)
-                .param("lib", libId)
-                .query(UUID.class)
-                .list();
-        if (row.isEmpty()) return null;
-        return row.get(0);
+        return mmlDao.findConstructorItemIdByLibId(libId).orElse(null);
     }
 
     private boolean constructorExists(UUID constructorItemId) {
-        if (constructorItemId == null) return false;
-        List<Integer> ok = db.sql("select 1 from constructor where item_id = :id")
-                .param("id", constructorItemId)
-                .query(Integer.class)
-                .list();
-        return !ok.isEmpty();
+        return mmlDao.constructorExists(constructorItemId);
     }
 
     private List<String> findConstructorLibIds(Element itemEl) {
         List<String> lst = new ArrayList<>();
-        List<org.dom4j.Node> nodes = itemEl.selectNodes(".//*[@absoluteconstrMMLId or @absolutepatternMMLId or @MMLId or @constr]");
+        List<org.dom4j.Node> nodes = itemEl.selectNodes(".//*[@absoluteconstrMMLId or @constr]");
         for (org.dom4j.Node n : nodes) {
             if (n instanceof Element el) {
                 String lib = el.attributeValue("absoluteconstrMMLId");
-                if (lib == null) lib = el.attributeValue("absolutepatternMMLId");
-                if (lib == null) lib = el.attributeValue("MMLId");
-                if (lib == null) lib = el.attributeValue("constr");
+                if ((lib == null || lib.isBlank()) && looksLikeLibId(el.attributeValue("constr"))) {
+                    lib = el.attributeValue("constr");
+                }
                 if (lib != null && !lib.isBlank()) lst.add(lib);
             }
         }
@@ -771,21 +944,15 @@ public class EsxMmlMapperService {
     }
 
     private String findBestLibId(Element itemEl, String articleName, String kind, String subKind) {
-        List<org.dom4j.Node> found = itemEl.selectNodes(".//*[@MMLId or @absoluteconstrMMLId or @absolutepatternMMLId or @constr]");
-        for (org.dom4j.Node n : found) {
-            if (n instanceof Element el) {
-                String libId = el.attributeValue("MMLId");
-                if (libId != null && !libId.isBlank()) return libId;
-
-                libId = el.attributeValue("absoluteconstrMMLId");
-                if (libId != null && !libId.isBlank()) return libId;
-
-                libId = el.attributeValue("absolutepatternMMLId");
-                if (libId != null && !libId.isBlank()) return libId;
-
-                libId = el.attributeValue("constr");
-                if (libId != null && !libId.isBlank()) return libId;
+        String own = findOwnMmlId(itemEl);
+        if (own != null && !own.isBlank()) {
+            String itemKind = itemEl.attributeValue("kind");
+            if (isDefinitionItemKind(itemKind)) {
+                Element child = firstElementChild(itemEl);
+                String xmlid = firstNonBlank(itemEl.attributeValue("xmlid"), child == null ? null : child.attributeValue("xmlid"));
+                return "statement:" + own + ":" + firstNonBlank(xmlid, "def");
             }
+            return own;
         }
 
         // fallback
@@ -798,103 +965,127 @@ public class EsxMmlMapperService {
         return null;
     }
 
+    private String findOwnMmlId(Element itemEl) {
+        if (itemEl == null) return null;
+
+        String own = itemEl.attributeValue("MMLId");
+        if (own != null && !own.isBlank()) return own;
+
+        Element firstChild = firstElementChild(itemEl);
+        if (firstChild != null) {
+            own = firstChild.attributeValue("MMLId");
+            if (own != null && !own.isBlank()) return own;
+        }
+        return null;
+    }
+
+    private Element firstElementChild(Element parent) {
+        if (parent == null) return null;
+        for (Iterator<?> it = parent.elementIterator(); it.hasNext(); ) {
+            Object o = it.next();
+            if (o instanceof Element e) return e;
+        }
+        return null;
+    }
+
+    private boolean looksLikeLibId(String value) {
+        return value != null && value.contains(":");
+    }
+
     // -------------------- Notation children: symbols / constructors / formats --------------------
 
     private UUID insertSymbolIfAbsent(UUID articleId, String text) {
-        if (text == null || text.isBlank()) return null;
-        String normalized = text.trim();
-
-        List<String> row = db.sql("select id from symbol where text = :t and article_id = :aid")
-                .params(Map.of("t", text, "aid", articleId))
-                .query(String.class)
-                .list();
-
-        if (!row.isEmpty()) return UUID.fromString(row.get(0));
-
-        return db.sql("insert into symbol(id, text, normalized, article_id) values(gen_random_uuid(), :t, :n, :aid) returning id")
-                .params(Map.of("t", text, "n", normalized, "aid", articleId))
-                .query(UUID.class)
-                .single();
+        return mmlDao.insertSymbolIfAbsent(articleId, text);
     }
 
     private void insertNotationSymbol(UUID notationItemId, UUID symbolId, int pos) {
-        if (notationItemId == null || symbolId == null) return;
-        db.sql("""
-                insert into notation_symbol(notation_item_id, symbol_id, pos)
-                values(:nid, :sid, :pos)
-                on conflict (notation_item_id, pos) do update set symbol_id=excluded.symbol_id
-                """)
-                .params(Map.of("nid", notationItemId, "sid", symbolId, "pos", pos))
-                .update();
+        mmlDao.insertNotationSymbol(notationItemId, symbolId, pos);
     }
 
     private void insertNotationConstructor(UUID notationItemId, UUID constructorItemId, String role) {
-        if (notationItemId == null || constructorItemId == null) return;
-        db.sql("""
-                insert into notation_constructor(notation_item_id, constructor_item_id, role)
-                values(:nid, :cid, :r)
-                on conflict (notation_item_id, constructor_item_id) do nothing
-                """)
-                .params(Map.of("nid", notationItemId, "cid", constructorItemId, "r", role))
-                .update();
+        mmlDao.insertNotationConstructor(notationItemId, constructorItemId, role);
     }
 
     private UUID upsertFormat(UUID articleId, String name, String representation) {
-        if (name == null || name.isBlank()) return null;
-
-        List<String> row = db.sql("select id from format where name = :n and article_id = :aid")
-                .params(Map.of("n", name, "aid", articleId))
-                .query(String.class)
-                .list();
-
-        if (!row.isEmpty()) return UUID.fromString(row.get(0));
-
-        return db.sql("insert into format(id, name, representation, article_id) values(gen_random_uuid(), :n, :r, :aid) returning id")
-                .params(Map.of("n", name, "r", representation, "aid", articleId))
-                .query(UUID.class)
-                .single();
+        return mmlDao.upsertFormat(articleId, name, representation);
     }
 
-    private void processNotationChildren(Element itemEl, UUID notationItemId, UUID articleId) {
-        if (itemEl == null || notationItemId == null) return;
+    private void processNotationChildren(
+            Element patternEl,
+            UUID notationItemId,
+            UUID articleId,
+            Map<String, UUID> libIdToItem,
+            List<PendingRelation> pendingRelations,
+            String fallbackConstructorLibId
+    ) {
+        if (patternEl == null || notationItemId == null) return;
 
         int pos = 1;
-
-        // symbols: nodes with spelling
-        List<org.dom4j.Node> nodes = itemEl.selectNodes(".//*[@spelling]");
-        for (org.dom4j.Node n : nodes) {
-            if (n instanceof Element el) {
-                String spelling = el.attributeValue("spelling");
-                if (spelling == null || spelling.isBlank()) continue;
-                UUID symId = insertSymbolIfAbsent(articleId, spelling);
-                if (symId != null) insertNotationSymbol(notationItemId, symId, pos++);
-            }
+        List<UUID> symbolIds = new ArrayList<>();
+        for (String symbolText : extractNotationSymbols(patternEl)) {
+            UUID symbolId = insertSymbolIfAbsent(articleId, symbolText);
+            if (symbolId == null) continue;
+            insertNotationSymbol(notationItemId, symbolId, pos++);
+            symbolIds.add(symbolId);
         }
 
-        // notation -> constructor(s)
-        List<org.dom4j.Node> patternNodes = itemEl.selectNodes(".//*[@absoluteconstrMMLId or @constr or @MMLId]");
-        for (org.dom4j.Node n : patternNodes) {
-            if (n instanceof Element pn) {
-                String constrLib = pn.attributeValue("absoluteconstrMMLId");
-                if (constrLib == null || constrLib.isBlank()) constrLib = pn.attributeValue("constr");
-                if (constrLib == null || constrLib.isBlank()) constrLib = pn.attributeValue("MMLId");
-                if (constrLib == null || constrLib.isBlank()) continue;
-
-                UUID constructorItem = findConstructorItemIdByLibId(constrLib);
-                if (constructorItem != null) insertNotationConstructor(notationItemId, constructorItem, null);
-            }
-        }
-
-        // formats
-        List<org.dom4j.Node> formatNodes = itemEl.selectNodes(".//*[@formatnr or @formatdes]");
+        List<org.dom4j.Node> formatNodes = patternEl.selectNodes(".//*[@formatnr or @formatdes]");
         for (org.dom4j.Node fn : formatNodes) {
-            if (fn instanceof Element el) {
-                String name = el.attributeValue("formatnr");
-                String repr = el.attributeValue("formatdes");
-                if (name == null || name.isBlank()) continue;
-                upsertFormat(articleId, name, repr);
+            if (!(fn instanceof Element el)) continue;
+            String name = el.attributeValue("formatnr");
+            String repr = el.attributeValue("formatdes");
+            if (name == null || name.isBlank()) continue;
+            UUID formatId = upsertFormat(articleId, name, repr);
+            if (formatId == null) continue;
+            insertNotationFormat(notationItemId, formatId);
+            for (int i = 0; i < symbolIds.size(); i++) {
+                insertFormatSymbol(formatId, symbolIds.get(i), i + 1);
             }
         }
+
+        Set<String> constructorLibIds = new LinkedHashSet<>();
+        if (looksLikeLibId(fallbackConstructorLibId)) {
+            constructorLibIds.add(fallbackConstructorLibId);
+        }
+        String ownConstructorLib = patternEl.attributeValue("absoluteconstrMMLId");
+        if (looksLikeLibId(ownConstructorLib)) {
+            constructorLibIds.add(ownConstructorLib);
+        }
+        List<org.dom4j.Node> constrNodes = patternEl.selectNodes(".//*[@absoluteconstrMMLId]");
+        for (org.dom4j.Node n : constrNodes) {
+            if (!(n instanceof Element e)) continue;
+            String lib = e.attributeValue("absoluteconstrMMLId");
+            if (looksLikeLibId(lib)) constructorLibIds.add(lib);
+        }
+
+        for (String constructorLibId : constructorLibIds) {
+            pendingRelations.add(PendingRelation.notationConstructor(notationItemId, constructorLibId, "denotes"));
+            UUID known = libIdToItem.get(constructorLibId);
+            if (known != null && constructorExists(known)) {
+                insertNotationConstructor(notationItemId, known, "denotes");
+            }
+        }
+    }
+
+    private List<String> extractNotationSymbols(Element patternEl) {
+        LinkedHashSet<String> symbols = new LinkedHashSet<>();
+
+        String rootSpelling = patternEl.attributeValue("spelling");
+        if (rootSpelling != null && !rootSpelling.isBlank()) {
+            symbols.add(rootSpelling);
+        }
+
+        List<org.dom4j.Node> nodes = patternEl.selectNodes(".//*[@spelling]");
+        for (org.dom4j.Node n : nodes) {
+            if (!(n instanceof Element e)) continue;
+            String name = e.getName();
+            if (name == null || !name.toLowerCase(Locale.ROOT).contains("symbol")) continue;
+            String spelling = e.attributeValue("spelling");
+            if (spelling == null || spelling.isBlank()) continue;
+            symbols.add(spelling);
+        }
+
+        return new ArrayList<>(symbols);
     }
 
     // -------------------- Utilities --------------------
@@ -906,27 +1097,5 @@ public class EsxMmlMapperService {
         return base.toUpperCase(Locale.ROOT);
     }
 
-    // -------------------- DTOs --------------------
-
-    private static class MmlItem {
-        String kind;
-        String subKind;
-        int number;
-        String libId;
-        String title;
-        String textContent;
-        String rawXml;
-        String shortName;
-    }
-
-    private static class PendingRef {
-        UUID itemId;
-        String refLibId;
-        String role;
-        PendingRef(UUID itemId, String refLibId, String role) {
-            this.itemId = itemId;
-            this.refLibId = refLibId;
-            this.role = role;
-        }
-    }
 }
+

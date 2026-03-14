@@ -4,6 +4,10 @@ import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.Id;
+import jakarta.persistence.Table;
 
 import java.time.Instant;
 import java.util.UUID;
@@ -16,9 +20,19 @@ import java.util.UUID;
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
+@Entity
+@Table(name = "constructor")
 public class Constructor {
+    @Id
+    @Column(name = "item_id")
     private UUID itemId;
+
+    @Column(name = "constructor_kind", nullable = false)
     private String constructorKind; // aggr, attr, func, mode, pred, sel, struct
+
+    @Column(name = "short_name")
     private String shortName;
+
+    @Column(name = "created_at")
     private Instant createdAt;
 }
