@@ -2,12 +2,19 @@ package mag.mizarstack.ingest;
 
 import lombok.extern.slf4j.Slf4j;
 import org.dom4j.Element;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
@@ -39,11 +46,31 @@ public class EsxMmlMapperService {
             "AggregateFunctor-Pattern",
             "Strict-Pattern"
     );
+    private static final int MAX_DEFERRED_RELATIONS = 500_000;
+    private static final int ITEM_NODE_RAW_MAX = 512;
+    private static final int ITEM_NODE_TEXT_MAX = 256;
+    private static final int DEFERRED_RESOLVE_INTERVAL_FILES = 25;
+    private static final int DEFERRED_RESOLVE_BATCH_SIZE = 20_000;
 
     private final EsxMmlJpaDao mmlDao;
+    private final TransactionTemplate txTemplate;
+    private final int mapperWorkerThreads;
+    private final Map<String, PendingRelation> deferredPendingRelations = new ConcurrentHashMap<>();
+    private final AtomicInteger mappedFileCounter = new AtomicInteger(0);
 
-    public EsxMmlMapperService(EsxMmlJpaDao mmlDao) {
+    public EsxMmlMapperService(
+            EsxMmlJpaDao mmlDao,
+            PlatformTransactionManager txManager,
+            @Value("${app.ingest.mapper.threads:0}") int mapperWorkerThreads
+    ) {
         this.mmlDao = mmlDao;
+        this.txTemplate = new TransactionTemplate(txManager);
+        if (mapperWorkerThreads > 0) {
+            this.mapperWorkerThreads = mapperWorkerThreads;
+        } else {
+            int auto = Runtime.getRuntime().availableProcessors();
+            this.mapperWorkerThreads = Math.max(1, Math.min(8, auto));
+        }
     }
 
     public Map<String, Object> processArticleXml(byte[] xmlBytes, String s3Key) {
@@ -61,26 +88,73 @@ public class EsxMmlMapperService {
         return processArticleXmlInternal(xmlBytes, s3Key, messages, progress);
     }
 
+    public Map<String, Integer> flushDeferredRelations(java.util.function.Consumer<String> progress) {
+        int passes = 0;
+        int resolvedTotal = 0;
+        int noProgressPasses = 0;
+        FileInsertStats flushStats = new FileInsertStats();
+
+        while (!deferredPendingRelations.isEmpty() && passes < 1_000) {
+            int before = deferredPendingRelations.size();
+            int resolved = resolveDeferredRelations(flushStats, msg -> {
+                if (progress != null && msg != null) {
+                    progress.accept(msg);
+                }
+            }, DEFERRED_RESOLVE_BATCH_SIZE * 2);
+
+            resolvedTotal += resolved;
+            passes++;
+
+            int after = deferredPendingRelations.size();
+            if (resolved <= 0 || after >= before) {
+                noProgressPasses++;
+            } else {
+                noProgressPasses = 0;
+            }
+
+            if (noProgressPasses >= 3) {
+                break;
+            }
+        }
+
+        if (progress != null) {
+            progress.accept("Deferred flush complete: resolved=" + resolvedTotal
+                    + " remaining=" + deferredPendingRelations.size()
+                    + " passes=" + passes);
+        }
+
+        return Map.of(
+                "resolved", resolvedTotal,
+                "remaining", deferredPendingRelations.size(),
+                "passes", passes
+        );
+    }
+
     private Map<String, Object> processArticleXmlInternal(
             byte[] xmlBytes,
             String s3Key,
             List<String> messages,
             java.util.function.Consumer<String> progress
     ) {
+        int mappedFileOrdinal = mappedFileCounter.incrementAndGet();
         var parsedItems = new AtomicInteger(0);
+        var failedItems = new AtomicInteger(0);
+        FileInsertStats insertStats = new FileInsertStats();
 
         // libId -> mml_item.id
         Map<String, UUID> libIdToItem = new ConcurrentHashMap<>();
         List<PendingRelation> pendingRelations = Collections.synchronizedList(new ArrayList<>());
+        Map<String, UUID> symbolCache = new ConcurrentHashMap<>();
+        Map<String, UUID> formatCache = new ConcurrentHashMap<>();
 
-        final List<String> finalMessages = (messages == null) ? new ArrayList<>() : messages;
+        final List<String> finalMessages = Collections.synchronizedList((messages == null) ? new ArrayList<>() : messages);
 
         java.util.function.Consumer<String> m = msg -> {
             finalMessages.add(msg);
             if (progress != null) {
                 try { progress.accept(msg); } catch (Exception e) { log.warn("progress consumer failed", e); }
             }
-            log.info("ESX-Mapper: {}", msg);
+            log.debug("ESX-Mapper: {}", msg);
         };
 
         try {
@@ -90,18 +164,20 @@ public class EsxMmlMapperService {
             UUID fallbackArticleId = upsertArticle(
                     fallbackArticle,
                     s3Key,
-                    new String(xmlBytes, StandardCharsets.UTF_8)
+                    new String(xmlBytes, StandardCharsets.UTF_8),
+                    insertStats
             );
 
             AtomicReference<UUID> currentArticleId = new AtomicReference<>(fallbackArticleId);
             AtomicReference<String> currentArticleName = new AtomicReference<>(fallbackArticle);
 
             m.accept("Article context (fallback): " + fallbackArticle + " (id=" + fallbackArticleId + ")");
+            m.accept("Mapper workers: " + mapperWorkerThreads);
 
             // Streaming SAX ingestion that is namespace/case safe.
             // We extract each <Item> subtree as XML and map it to DB.
             ingestItemsSax(xmlBytes, s3Key, currentArticleId, currentArticleName,
-                    parsedItems, libIdToItem, pendingRelations, m);
+                    parsedItems, failedItems, libIdToItem, pendingRelations, symbolCache, formatCache, insertStats, m);
 
             if (parsedItems.get() == 0) {
                 detectLikelyItemElements(xmlBytes, m);
@@ -111,33 +187,52 @@ public class EsxMmlMapperService {
 
             AtomicInteger resolvedRefs = new AtomicInteger(0);
             int total = pendingRelations.size();
+            List<PendingRelation> unresolvedRelations = new ArrayList<>();
+            Set<String> unresolvedConstructorLibIds = pendingRelations.stream()
+                    .map(p -> p.constructorLibId)
+                    .filter(Objects::nonNull)
+                    .filter(s -> !s.isBlank())
+                    .filter(s -> !libIdToItem.containsKey(s))
+                    .collect(Collectors.toCollection(LinkedHashSet::new));
+            Map<String, UUID> dbResolvedConstructors = mmlDao.findConstructorItemIdsByLibIds(unresolvedConstructorLibIds);
+
             m.accept("Resolving pending relations: " + total);
+            m.accept("Prefetched constructor mappings: " + dbResolvedConstructors.size() + " / " + unresolvedConstructorLibIds.size());
 
-            for (PendingRelation pending : pendingRelations) {
-                UUID constructorItemId = libIdToItem.get(pending.constructorLibId);
-                if (constructorItemId == null) {
-                    constructorItemId = findConstructorItemIdByLibId(pending.constructorLibId);
+            txTemplate.executeWithoutResult(status -> {
+                for (PendingRelation pending : pendingRelations) {
+                    UUID constructorItemId = dbResolvedConstructors.get(pending.constructorLibId);
+                    if (constructorItemId == null) {
+                        constructorItemId = libIdToItem.get(pending.constructorLibId);
+                    }
+                    if (constructorItemId == null) {
+                        unresolvedRelations.add(pending);
+                        continue;
+                    }
+                    resolvePendingRelation(pending, constructorItemId, insertStats);
+                    int r = resolvedRefs.incrementAndGet();
+                    if (r % 500 == 0) m.accept("Resolved relations: " + r + " / " + total);
                 }
-                if (constructorItemId == null) continue;
+            });
 
-                switch (pending.type) {
-                    case ITEM_CONSTRUCTOR_REF ->
-                            insertItemConstructorRef(pending.sourceItemId, constructorItemId, pending.role, pending.isPositive, pending.occurrences, pending.details);
-                    case NOTATION_CONSTRUCTOR ->
-                            insertNotationConstructor(pending.sourceItemId, constructorItemId, pending.role);
-                    case CONSTRUCTOR_DEFINITION ->
-                            insertConstructorDefinition(constructorItemId, pending.sourceItemId);
-                    case CONSTRUCTOR_DEFINIENS ->
-                            insertConstructorDefiniens(pending.sourceItemId, constructorItemId);
-                    case REGISTRATION_RELATION ->
-                            insertRegistrationRelation(pending.sourceItemId, constructorItemId, pending.role, pending.isPositive);
+            if (!unresolvedRelations.isEmpty()) {
+                enqueueDeferredRelations(unresolvedRelations);
+                m.accept("Deferred unresolved relations for cross-file resolution: "
+                        + unresolvedRelations.size() + " (queue=" + deferredPendingRelations.size() + ")");
+            }
+            boolean shouldResolveDeferred = (mappedFileOrdinal % DEFERRED_RESOLVE_INTERVAL_FILES == 0)
+                    || deferredPendingRelations.size() >= (MAX_DEFERRED_RELATIONS / 2);
+            if (shouldResolveDeferred) {
+                int deferredResolved = resolveDeferredRelations(insertStats, m, DEFERRED_RESOLVE_BATCH_SIZE);
+                if (deferredResolved > 0) {
+                    m.accept("Resolved deferred relations after file commit: " + deferredResolved
+                            + " (queue=" + deferredPendingRelations.size() + ")");
                 }
-                int r = resolvedRefs.incrementAndGet();
-                if (r % 500 == 0) m.accept("Resolved relations: " + r + " / " + total);
             }
 
             m.accept("Resolving complete: resolved=" + resolvedRefs.get()
                     + " unresolved=" + (pendingRelations.size() - resolvedRefs.get()));
+            m.accept("Inserted rows by type: " + formatInsertStats(insertStats.snapshotOrdered()));
 
         } catch (Exception e) {
             log.warn("Error while mapping ESX XML", e);
@@ -147,9 +242,12 @@ public class EsxMmlMapperService {
             }
         }
 
+        Map<String, Long> insertedCounts = insertStats.snapshotOrdered();
         return Map.of(
                 "processedItems", parsedItems.get(),
+                "failedItems", failedItems.get(),
                 "pendingRefs", pendingRelations.size(),
+                "insertedCounts", insertedCounts,
                 "messages", finalMessages
         );
     }
@@ -160,8 +258,12 @@ public class EsxMmlMapperService {
             AtomicReference<UUID> currentArticleId,
             AtomicReference<String> currentArticleName,
             AtomicInteger parsedItems,
+            AtomicInteger failedItems,
             Map<String, UUID> libIdToItem,
             List<PendingRelation> pendingRelations,
+            Map<String, UUID> symbolCache,
+            Map<String, UUID> formatCache,
+            FileInsertStats insertStats,
             java.util.function.Consumer<String> m
     ) throws Exception {
         javax.xml.parsers.SAXParserFactory f = javax.xml.parsers.SAXParserFactory.newInstance();
@@ -169,138 +271,251 @@ public class EsxMmlMapperService {
         try { f.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false); } catch (Exception ignore) {}
         try { f.setFeature("http://xml.org/sax/features/validation", false); } catch (Exception ignore) {}
 
+        final ExecutorService itemExecutor = createItemExecutor();
         var parser = f.newSAXParser();
 
-        parser.parse(new ByteArrayInputStream(xmlBytes), new org.xml.sax.helpers.DefaultHandler() {
-            private int itemDepth = 0;
-            private StringBuilder itemXml;
+        try {
+            parser.parse(new ByteArrayInputStream(xmlBytes), new org.xml.sax.helpers.DefaultHandler() {
+                private int itemDepth = 0;
+                private StringBuilder itemXml;
 
-            private String elementName(String localName, String qName) {
-                return (qName != null && !qName.isBlank()) ? qName : ((localName != null && !localName.isBlank()) ? localName : "");
-            }
+                private String elementName(String localName, String qName) {
+                    return (qName != null && !qName.isBlank()) ? qName : ((localName != null && !localName.isBlank()) ? localName : "");
+                }
 
-            private String elementLocal(String localName, String qName) {
-                // used for matching by local-name ignoring prefix
-                if (localName != null && !localName.isBlank()) return localName;
-                if (qName == null) return "";
-                int idx = qName.indexOf(':');
-                return idx >= 0 ? qName.substring(idx + 1) : qName;
-            }
+                private String elementLocal(String localName, String qName) {
+                    // used for matching by local-name ignoring prefix
+                    if (localName != null && !localName.isBlank()) return localName;
+                    if (qName == null) return "";
+                    int idx = qName.indexOf(':');
+                    return idx >= 0 ? qName.substring(idx + 1) : qName;
+                }
 
-            @Override
-            public void startElement(String uri, String localName, String qName, org.xml.sax.Attributes attributes) {
-                String tagName = elementName(localName, qName);
-                String local = elementLocal(localName, qName);
+                @Override
+                public void startElement(String uri, String localName, String qName, org.xml.sax.Attributes attributes) {
+                    String tagName = elementName(localName, qName);
+                    String local = elementLocal(localName, qName);
 
-                // Update article context (Text-Proper/@articleid)
-                if (equalsAnyIgnoreCase(local, "Text-Proper")) {
-                    String article = attrIgnoreCase(attributes, "articleid");
-                    if (article != null && !article.isBlank()) {
-                        try {
-                            UUID aid = upsertArticle(article, s3Key, new String(xmlBytes, StandardCharsets.UTF_8));
-                            currentArticleId.set(aid);
-                            currentArticleName.set(article);
-                            m.accept("Article detected from Text-Proper: " + article + " (id=" + aid + ")");
-                        } catch (Exception ex) {
-                            log.warn("Text-Proper detection failed", ex);
+                    // Update article context (Text-Proper/@articleid)
+                    if (equalsAnyIgnoreCase(local, "Text-Proper")) {
+                        String article = attrIgnoreCase(attributes, "articleid");
+                        if (article != null && !article.isBlank()) {
+                            try {
+                                UUID aid = upsertArticle(article, s3Key, new String(xmlBytes, StandardCharsets.UTF_8), insertStats);
+                                currentArticleId.set(aid);
+                                currentArticleName.set(article);
+                                m.accept("Article detected from Text-Proper: " + article + " (id=" + aid + ")");
+                            } catch (Exception ex) {
+                                log.warn("Text-Proper detection failed", ex);
+                            }
+                        }
+                    }
+
+                    // Capture <Item> subtree (match by local name, ignore namespace prefix)
+                    if (equalsAnyIgnoreCase(local, "Item")) {
+                        if (itemDepth == 0) {
+                            itemXml = new StringBuilder(4096);
+                        }
+                        itemDepth++;
+                    }
+
+                    if (itemDepth > 0) {
+                        appendStartTag(itemXml, tagName, attributes);
+                    }
+                }
+
+                @Override
+                public void characters(char[] ch, int start, int length) {
+                    if (itemDepth > 0 && itemXml != null) {
+                        // escape basic XML chars
+                        for (int i = start; i < start + length; i++) {
+                            char c = ch[i];
+                            switch (c) {
+                                case '&' -> itemXml.append("&amp;");
+                                case '<' -> itemXml.append("&lt;");
+                                case '>' -> itemXml.append("&gt;");
+                                case '"' -> itemXml.append("&quot;");
+                                case '\'' -> itemXml.append("&apos;");
+                                default -> itemXml.append(c);
+                            }
                         }
                     }
                 }
 
-                // Capture <Item> subtree (match by local name, ignore namespace prefix)
-                if (equalsAnyIgnoreCase(local, "Item")) {
-                    if (itemDepth == 0) {
-                        itemXml = new StringBuilder(4096);
+                @Override
+                public void endElement(String uri, String localName, String qName) {
+                    String tagName = elementName(localName, qName);
+                    String local = elementLocal(localName, qName);
+
+                    if (itemDepth > 0 && itemXml != null) {
+                        itemXml.append("</").append(tagName).append('>');
                     }
-                    itemDepth++;
-                }
 
-                if (itemDepth > 0) {
-                    appendStartTag(itemXml, tagName, attributes);
-                }
-            }
+                    if (equalsAnyIgnoreCase(local, "Item")) {
+                        itemDepth--;
+                        if (itemDepth == 0) {
+                            final String itemXmlSnapshot = itemXml.toString();
+                            final UUID articleIdSnapshot = currentArticleId.get();
+                            final String articleNameSnapshot = currentArticleName.get();
 
-            @Override
-            public void characters(char[] ch, int start, int length) {
-                if (itemDepth > 0 && itemXml != null) {
-                    // escape basic XML chars
-                    for (int i = start; i < start + length; i++) {
-                        char c = ch[i];
-                        switch (c) {
-                            case '&' -> itemXml.append("&amp;");
-                            case '<' -> itemXml.append("&lt;");
-                            case '>' -> itemXml.append("&gt;");
-                            case '"' -> itemXml.append("&quot;");
-                            case '\'' -> itemXml.append("&apos;");
-                            default -> itemXml.append(c);
-                        }
-                    }
-                }
-            }
-
-            @Override
-            public void endElement(String uri, String localName, String qName) {
-                String tagName = elementName(localName, qName);
-                String local = elementLocal(localName, qName);
-
-                if (itemDepth > 0 && itemXml != null) {
-                    itemXml.append("</").append(tagName).append('>');
-                }
-
-                if (equalsAnyIgnoreCase(local, "Item")) {
-                    itemDepth--;
-                    if (itemDepth == 0) {
-                        // finalize item
-                        try {
-                            Element itemEl = org.dom4j.DocumentHelper.parseText(itemXml.toString()).getRootElement();
-
-                            UUID articleId = currentArticleId.get();
-                            String articleName = currentArticleName.get();
-                            if (articleId == null) {
-                                articleId = upsertArticle(deriveArticleNameFromS3Key(s3Key), s3Key, new String(xmlBytes, StandardCharsets.UTF_8));
-                                currentArticleId.set(articleId);
-                            }
-
-                            MappedMmlItem statementItem = extractItem(itemEl, articleName);
-                            UUID statementItemId = upsertMmlItem(articleId, statementItem);
-
-                            if (statementItem.libId != null && !statementItem.libId.isBlank()) {
-                                libIdToItem.put(statementItem.libId, statementItemId);
-                            }
+                            Runnable task = () -> processItemSubtree(
+                                    itemXmlSnapshot,
+                                    xmlBytes,
+                                    s3Key,
+                                    articleIdSnapshot,
+                                    articleNameSnapshot,
+                                    currentArticleId,
+                                    currentArticleName,
+                                    parsedItems,
+                                    failedItems,
+                                    libIdToItem,
+                                    pendingRelations,
+                                    symbolCache,
+                                    formatCache,
+                                    insertStats,
+                                    m
+                            );
 
                             try {
-                                insertStatement(statementItemId, normalizeStatementKind(statementItem.subKind), statementItem.textContent);
-                            } catch (Exception ignore) {}
-
-                            List<String> references = findConstructorLibIds(itemEl);
-                            for (String rlib : references) {
-                                pendingRelations.add(PendingRelation.itemConstructorRef(statementItemId, rlib, "ref", true, 1, null));
+                                if (itemExecutor != null) {
+                                    itemExecutor.execute(task);
+                                } else {
+                                    task.run();
+                                }
+                            } catch (Exception ex) {
+                                failedItems.incrementAndGet();
+                                log.warn("Failed to submit Item subtree task", ex);
+                                m.accept("Failed to submit Item subtree task: " + ex.getMessage());
+                            } finally {
+                                itemXml = null;
                             }
-
-                            String itemKind = Optional.ofNullable(itemEl.attributeValue("kind")).orElse("");
-                            if (isDefinitionItemKind(itemKind)) {
-                                processDefinitionItem(itemEl, itemKind, articleId, articleName, statementItemId, libIdToItem, pendingRelations);
-                            }
-                            if (isClusterItemKind(itemKind)) {
-                                processRegistrationItem(itemEl, articleId, articleName, libIdToItem, pendingRelations);
-                            }
-
-                            int count = parsedItems.incrementAndGet();
-                            if (count == 1) {
-                                m.accept("First item seen: elementName=Item kind=" + statementItem.kind + " subkind=" + statementItem.subKind + " number=" + statementItem.number + " libId=" + statementItem.libId);
-                            }
-                            if (count % 200 == 0) m.accept("Processed items: " + count);
-
-                        } catch (Exception ex) {
-                            log.warn("Failed to process Item subtree", ex);
-                            m.accept("Failed to process Item subtree: " + ex.getMessage());
-                        } finally {
-                            itemXml = null;
                         }
                     }
                 }
-            }
-        });
+            });
+        } finally {
+            awaitItemExecutor(itemExecutor, m);
+        }
+    }
+
+    private ExecutorService createItemExecutor() {
+        if (mapperWorkerThreads <= 1) {
+            return null;
+        }
+        int queueCapacity = Math.max(32, mapperWorkerThreads * 8);
+        return new ThreadPoolExecutor(
+                mapperWorkerThreads,
+                mapperWorkerThreads,
+                60L,
+                TimeUnit.SECONDS,
+                new ArrayBlockingQueue<>(queueCapacity),
+                new ThreadPoolExecutor.CallerRunsPolicy()
+        );
+    }
+
+    private void awaitItemExecutor(ExecutorService itemExecutor, java.util.function.Consumer<String> m) throws InterruptedException {
+        if (itemExecutor == null) return;
+
+        itemExecutor.shutdown();
+        if (!itemExecutor.awaitTermination(1, TimeUnit.HOURS)) {
+            itemExecutor.shutdownNow();
+            m.accept("Mapper workers timeout: forced shutdown");
+        }
+    }
+
+    private void processItemSubtree(
+            String itemXml,
+            byte[] xmlBytes,
+            String s3Key,
+            UUID articleIdHint,
+            String articleNameHint,
+            AtomicReference<UUID> currentArticleId,
+            AtomicReference<String> currentArticleName,
+            AtomicInteger parsedItems,
+            AtomicInteger failedItems,
+            Map<String, UUID> libIdToItem,
+            List<PendingRelation> pendingRelations,
+            Map<String, UUID> symbolCache,
+            Map<String, UUID> formatCache,
+            FileInsertStats insertStats,
+            java.util.function.Consumer<String> m
+    ) {
+        try {
+            txTemplate.executeWithoutResult(status -> {
+                try {
+                    Element itemEl = org.dom4j.DocumentHelper.parseText(itemXml).getRootElement();
+
+                    UUID articleId = articleIdHint != null ? articleIdHint : currentArticleId.get();
+                    String articleName = (articleNameHint != null && !articleNameHint.isBlank())
+                            ? articleNameHint
+                            : currentArticleName.get();
+
+                    if (articleId == null) {
+                        articleId = upsertArticle(
+                                deriveArticleNameFromS3Key(s3Key),
+                                s3Key,
+                                new String(xmlBytes, StandardCharsets.UTF_8),
+                                insertStats
+                        );
+                        currentArticleId.compareAndSet(null, articleId);
+                    }
+                    if (articleName == null || articleName.isBlank()) {
+                        articleName = deriveArticleNameFromS3Key(s3Key);
+                        currentArticleName.compareAndSet(null, articleName);
+                    }
+
+                    MappedMmlItem statementItem = extractItem(itemEl, articleName);
+                    UUID statementItemId = upsertMmlItem(articleId, statementItem, insertStats);
+
+                    if (statementItem.libId != null && !statementItem.libId.isBlank()) {
+                        libIdToItem.put(statementItem.libId, statementItemId);
+                    }
+
+                    try {
+                        insertStatement(statementItemId, normalizeStatementKind(statementItem.subKind), statementItem.textContent, insertStats);
+                    } catch (Exception ignore) {
+                    }
+
+                    // Persist every XML tag from this Item subtree into item_node for future sequence/context queries.
+                    mapAllItemNodes(
+                            itemEl,
+                            statementItemId,
+                            articleId,
+                            pendingRelations,
+                            symbolCache,
+                            formatCache,
+                            insertStats
+                    );
+
+                    List<String> references = findConstructorLibIds(itemEl);
+                    for (String rlib : references) {
+                        pendingRelations.add(PendingRelation.itemConstructorRef(statementItemId, rlib, "ref", true, 1, null));
+                    }
+
+                    String itemKind = Optional.ofNullable(itemEl.attributeValue("kind")).orElse("");
+                    if (isDefinitionItemKind(itemKind)) {
+                        processDefinitionItem(itemEl, itemKind, articleId, articleName, statementItemId, libIdToItem, pendingRelations, symbolCache, formatCache, insertStats);
+                    }
+                    if (isClusterItemKind(itemKind)) {
+                        processRegistrationItem(itemEl, articleId, articleName, libIdToItem, pendingRelations, insertStats);
+                    }
+
+                    int count = parsedItems.incrementAndGet();
+                    if (count == 1) {
+                        m.accept("First item seen: elementName=Item kind=" + statementItem.kind + " subkind=" + statementItem.subKind + " number=" + statementItem.number + " libId=" + statementItem.libId);
+                    }
+                    if (count % 200 == 0) m.accept("Processed items: " + count);
+                } catch (Exception ex) {
+                    throw new IllegalStateException(ex);
+                }
+            });
+
+        } catch (Exception ex) {
+            Throwable root = ex.getCause() != null ? ex.getCause() : ex;
+            failedItems.incrementAndGet();
+            log.warn("Failed to process Item subtree", root);
+            m.accept("Failed to process Item subtree: " + root.getMessage());
+        }
     }
 
     private static void appendStartTag(StringBuilder sb, String name, org.xml.sax.Attributes attributes) {
@@ -406,6 +621,15 @@ public class EsxMmlMapperService {
                 .collect(Collectors.joining(", "));
     }
 
+    private static String formatInsertStats(Map<String, Long> stats) {
+        if (stats == null || stats.isEmpty()) {
+            return "<none>";
+        }
+        return stats.entrySet().stream()
+                .map(e -> e.getKey() + "=" + e.getValue())
+                .collect(Collectors.joining(", "));
+    }
+
     private static boolean equalsAnyIgnoreCase(String s, String... options) {
         if (s == null) return false;
         for (String o : options) {
@@ -416,54 +640,214 @@ public class EsxMmlMapperService {
 
     // -------------------- DB: Article --------------------
 
-    private UUID upsertArticle(String articleName, String s3Key, String xmlContent) {
-        return mmlDao.upsertArticle(articleName, s3Key, xmlContent);
+    private UUID upsertArticle(String articleName, String s3Key, String xmlContent, FileInsertStats stats) {
+        UpsertResult result = mmlDao.upsertArticle(articleName, s3Key, xmlContent);
+        if (result.inserted()) {
+            stats.add(FileInsertStats.ARTICLE, 1);
+        }
+        return result.id();
     }
 
     // -------------------- DB: Items (UPSERT) --------------------
 
-    private UUID upsertMmlItem(UUID articleId, MappedMmlItem it) {
-        return mmlDao.upsertMmlItem(articleId, it);
+    private UUID upsertMmlItem(UUID articleId, MappedMmlItem it, FileInsertStats stats) {
+        UpsertResult result = mmlDao.upsertMmlItem(articleId, it);
+        if (result.inserted()) {
+            stats.add(FileInsertStats.MML_ITEM, 1);
+        }
+        return result.id();
     }
 
-    private void insertConstructor(UUID itemId, String constructorKind, String shortName) {
-        mmlDao.insertConstructor(itemId, constructorKind, shortName);
+    private void insertConstructor(UUID itemId, String constructorKind, String shortName, FileInsertStats stats) {
+        stats.add(FileInsertStats.CONSTRUCTOR, mmlDao.insertConstructor(itemId, constructorKind, shortName));
     }
 
-    private void insertNotation(UUID itemId, UUID articleId, String notationKind) {
-        mmlDao.insertNotation(itemId, notationKind);
+    private void insertNotation(UUID itemId, UUID articleId, String notationKind, FileInsertStats stats) {
+        stats.add(FileInsertStats.NOTATION, mmlDao.insertNotation(itemId, notationKind));
     }
 
-    private void insertStatement(UUID itemId, String statementKind, String text) {
-        mmlDao.insertStatement(itemId, statementKind, text);
+    private void insertStatement(UUID itemId, String statementKind, String text, FileInsertStats stats) {
+        stats.add(FileInsertStats.STATEMENT, mmlDao.insertStatement(itemId, statementKind, text));
     }
 
-    private void insertRegistration(UUID itemId, String regKind) {
-        mmlDao.insertRegistration(itemId, regKind);
+    private void insertRegistration(UUID itemId, String regKind, FileInsertStats stats) {
+        stats.add(FileInsertStats.REGISTRATION, mmlDao.insertRegistration(itemId, regKind));
     }
 
-    private void insertItemConstructorRef(UUID itemId, UUID constructorItemId, String role, boolean isPositive, int occurrences, Map<String, Object> details) {
-        mmlDao.insertItemConstructorRef(itemId, constructorItemId, role, isPositive, occurrences, details);
+    private void insertItemConstructorRef(UUID itemId, UUID constructorItemId, String role, boolean isPositive, int occurrences, Map<String, Object> details, FileInsertStats stats) {
+        stats.add(FileInsertStats.ITEM_CONSTRUCTOR_REF, mmlDao.insertItemConstructorRef(itemId, constructorItemId, role, isPositive, occurrences, details));
     }
 
-    private void insertNotationFormat(UUID notationItemId, UUID formatId) {
-        mmlDao.insertNotationFormat(notationItemId, formatId);
+    private void insertNotationFormat(UUID notationItemId, UUID formatId, FileInsertStats stats) {
+        stats.add(FileInsertStats.NOTATION_FORMAT, mmlDao.insertNotationFormat(notationItemId, formatId));
     }
 
-    private void insertFormatSymbol(UUID formatId, UUID symbolId, int pos) {
-        mmlDao.insertFormatSymbol(formatId, symbolId, pos);
+    private void insertFormatSymbol(UUID formatId, UUID symbolId, int pos, FileInsertStats stats) {
+        stats.add(FileInsertStats.FORMAT_SYMBOL, mmlDao.insertFormatSymbol(formatId, symbolId, pos));
     }
 
-    private void insertConstructorDefinition(UUID constructorItemId, UUID definitionStatementItemId) {
-        mmlDao.insertConstructorDefinition(constructorItemId, definitionStatementItemId);
+    private void insertConstructorDefinition(UUID constructorItemId, UUID definitionStatementItemId, FileInsertStats stats) {
+        stats.add(FileInsertStats.CONSTRUCTOR_DEFINITION, mmlDao.insertConstructorDefinition(constructorItemId, definitionStatementItemId));
     }
 
-    private void insertConstructorDefiniens(UUID definiensStatementItemId, UUID constructorItemId) {
-        mmlDao.insertConstructorDefiniens(definiensStatementItemId, constructorItemId);
+    private void insertConstructorDefiniens(UUID definiensStatementItemId, UUID constructorItemId, FileInsertStats stats) {
+        stats.add(FileInsertStats.CONSTRUCTOR_DEFINIENS, mmlDao.insertConstructorDefiniens(definiensStatementItemId, constructorItemId));
     }
 
-    private void insertRegistrationRelation(UUID registrationItemId, UUID constructorItemId, String role, boolean isPositive) {
-        mmlDao.insertRegistrationRelation(registrationItemId, constructorItemId, role, isPositive);
+    private void insertRegistrationRelation(UUID registrationItemId, UUID constructorItemId, String role, boolean isPositive, FileInsertStats stats) {
+        stats.add(FileInsertStats.REGISTRATION_RELATION, mmlDao.insertRegistrationRelation(registrationItemId, constructorItemId, role, isPositive));
+    }
+
+    private void insertItemNode(
+            UUID nodeId,
+            UUID itemId,
+            UUID parentNodeId,
+            String nodePath,
+            String nodeType,
+            UUID constructorItemId,
+            UUID symbolId,
+            UUID formatId,
+            int pos,
+            int depth,
+            String raw,
+            Map<String, Object> details,
+            FileInsertStats stats
+    ) {
+        int inserted = mmlDao.insertItemNode(
+                nodeId,
+                itemId,
+                parentNodeId,
+                nodePath,
+                nodeType,
+                constructorItemId,
+                symbolId,
+                formatId,
+                pos,
+                depth,
+                raw,
+                details
+        );
+        stats.add(FileInsertStats.ITEM_NODE, inserted);
+        if (inserted > 0) {
+            if (constructorItemId != null) {
+                stats.add(FileInsertStats.ITEM_NODE_WITH_CONSTRUCTOR, inserted);
+            }
+            if (symbolId != null) {
+                stats.add(FileInsertStats.ITEM_NODE_WITH_SYMBOL, inserted);
+            }
+            if (formatId != null) {
+                stats.add(FileInsertStats.ITEM_NODE_WITH_FORMAT, inserted);
+            }
+        }
+    }
+
+    private void updateItemNodeConstructor(UUID nodeId, UUID constructorItemId, FileInsertStats stats) {
+        int updated = mmlDao.updateItemNodeConstructor(nodeId, constructorItemId);
+        stats.add(FileInsertStats.ITEM_NODE_WITH_CONSTRUCTOR, updated);
+    }
+
+    private void resolvePendingRelation(PendingRelation pending, UUID constructorItemId, FileInsertStats insertStats) {
+        if (pending == null || constructorItemId == null) {
+            return;
+        }
+        switch (pending.type) {
+            case ITEM_CONSTRUCTOR_REF ->
+                    insertItemConstructorRef(pending.sourceItemId, constructorItemId, pending.role, pending.isPositive, pending.occurrences, pending.details, insertStats);
+            case NOTATION_CONSTRUCTOR ->
+                    insertNotationConstructor(pending.sourceItemId, constructorItemId, pending.role, insertStats);
+            case CONSTRUCTOR_DEFINITION ->
+                    insertConstructorDefinition(constructorItemId, pending.sourceItemId, insertStats);
+            case CONSTRUCTOR_DEFINIENS ->
+                    insertConstructorDefiniens(pending.sourceItemId, constructorItemId, insertStats);
+            case REGISTRATION_RELATION ->
+                    insertRegistrationRelation(pending.sourceItemId, constructorItemId, pending.role, pending.isPositive, insertStats);
+            case ITEM_NODE_CONSTRUCTOR ->
+                    updateItemNodeConstructor(pending.sourceItemId, constructorItemId, insertStats);
+        }
+    }
+
+    private void enqueueDeferredRelations(List<PendingRelation> unresolvedRelations) {
+        if (unresolvedRelations == null || unresolvedRelations.isEmpty()) {
+            return;
+        }
+        if (deferredPendingRelations.size() >= MAX_DEFERRED_RELATIONS) {
+            return;
+        }
+        for (PendingRelation pending : unresolvedRelations) {
+            if (pending == null) continue;
+            if (deferredPendingRelations.size() >= MAX_DEFERRED_RELATIONS) break;
+            deferredPendingRelations.putIfAbsent(deferredRelationKey(pending), pending);
+        }
+    }
+
+    private int resolveDeferredRelations(
+            FileInsertStats insertStats,
+            java.util.function.Consumer<String> m,
+            int maxBatchSize
+    ) {
+        if (deferredPendingRelations.isEmpty()) {
+            return 0;
+        }
+        int batchLimit = Math.max(1_000, maxBatchSize);
+        List<Map.Entry<String, PendingRelation>> snapshot = new ArrayList<>(Math.min(batchLimit, deferredPendingRelations.size()));
+        for (Map.Entry<String, PendingRelation> entry : deferredPendingRelations.entrySet()) {
+            snapshot.add(entry);
+            if (snapshot.size() >= batchLimit) {
+                break;
+            }
+        }
+        if (snapshot.isEmpty()) {
+            return 0;
+        }
+
+        Set<String> unresolvedConstructorLibIds = snapshot.stream()
+                .map(Map.Entry::getValue)
+                .map(p -> p.constructorLibId)
+                .filter(Objects::nonNull)
+                .filter(s -> !s.isBlank())
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+        if (unresolvedConstructorLibIds.isEmpty()) {
+            return 0;
+        }
+
+        Map<String, UUID> dbResolvedConstructors = mmlDao.findConstructorItemIdsByLibIds(unresolvedConstructorLibIds);
+        if (dbResolvedConstructors.isEmpty()) {
+            return 0;
+        }
+
+        AtomicInteger resolved = new AtomicInteger(0);
+        txTemplate.executeWithoutResult(status -> {
+            for (Map.Entry<String, PendingRelation> entry : snapshot) {
+                PendingRelation pending = entry.getValue();
+                if (pending == null) continue;
+                UUID constructorItemId = dbResolvedConstructors.get(pending.constructorLibId);
+                if (constructorItemId == null) continue;
+                resolvePendingRelation(pending, constructorItemId, insertStats);
+                deferredPendingRelations.remove(entry.getKey(), pending);
+                resolved.incrementAndGet();
+            }
+        });
+        if (resolved.get() > 0) {
+            m.accept("Deferred relations queue size: " + deferredPendingRelations.size());
+        }
+        return resolved.get();
+    }
+
+    private static String deferredRelationKey(PendingRelation pending) {
+        String constructorLibId = safeDeferredValue(pending.constructorLibId);
+        String role = safeDeferredValue(pending.role);
+        int detailsHash = (pending.details == null) ? 0 : pending.details.hashCode();
+        return pending.type + "|"
+                + pending.sourceItemId + "|"
+                + constructorLibId + "|"
+                + role + "|"
+                + pending.isPositive + "|"
+                + pending.occurrences + "|"
+                + detailsHash;
+    }
+
+    private static String safeDeferredValue(String value) {
+        return (value == null || value.isBlank()) ? "_" : value;
     }
 
     private boolean isDefinitionItemKind(String itemKind) {
@@ -481,7 +865,10 @@ public class EsxMmlMapperService {
             String articleName,
             UUID statementItemId,
             Map<String, UUID> libIdToItem,
-            List<PendingRelation> pendingRelations
+            List<PendingRelation> pendingRelations,
+            Map<String, UUID> symbolCache,
+            Map<String, UUID> formatCache,
+            FileInsertStats insertStats
     ) {
         Element definitionEl = firstDirectChildByName(itemEl, itemKind);
         if (definitionEl == null) return;
@@ -491,8 +878,8 @@ public class EsxMmlMapperService {
 
         if (constructorKind != null && constructorLibId != null && !constructorLibId.isBlank()) {
             MappedMmlItem constructorItem = buildSpecializedItem(definitionEl, "constructor", constructorKind, constructorLibId, articleName);
-            UUID constructorItemId = upsertMmlItem(articleId, constructorItem);
-            insertConstructor(constructorItemId, constructorKind, constructorItem.shortName);
+            UUID constructorItemId = upsertMmlItem(articleId, constructorItem, insertStats);
+            insertConstructor(constructorItemId, constructorKind, constructorItem.shortName, insertStats);
             libIdToItem.put(constructorLibId, constructorItemId);
 
             if (definitionEl.selectSingleNode("./Definiens") != null || definitionEl.selectSingleNode(".//Definiens") != null) {
@@ -503,7 +890,7 @@ public class EsxMmlMapperService {
 
         List<Element> patternElements = findNotationPatternElements(definitionEl);
         for (Element patternEl : patternElements) {
-            processNotationPattern(patternEl, articleId, articleName, constructorLibId, libIdToItem, pendingRelations);
+            processNotationPattern(patternEl, articleId, articleName, constructorLibId, libIdToItem, pendingRelations, symbolCache, formatCache, insertStats);
         }
     }
 
@@ -512,7 +899,8 @@ public class EsxMmlMapperService {
             UUID articleId,
             String articleName,
             Map<String, UUID> libIdToItem,
-            List<PendingRelation> pendingRelations
+            List<PendingRelation> pendingRelations,
+            FileInsertStats insertStats
     ) {
         Element clusterEl = firstDirectChildByName(itemEl, "Cluster");
         if (clusterEl == null) return;
@@ -533,8 +921,8 @@ public class EsxMmlMapperService {
         String regLibId = buildRegistrationLibId(articleName, regKind, registrationEl.attributeValue("xmlid"));
 
         MappedMmlItem regItem = buildSpecializedItem(registrationEl, "registration", regKind, regLibId, articleName);
-        UUID registrationItemId = upsertMmlItem(articleId, regItem);
-        insertRegistration(registrationItemId, normalizeRegistrationKind(regKind));
+        UUID registrationItemId = upsertMmlItem(articleId, regItem, insertStats);
+        insertRegistration(registrationItemId, normalizeRegistrationKind(regKind), insertStats);
         if (regItem.libId != null && !regItem.libId.isBlank()) {
             libIdToItem.put(regItem.libId, registrationItemId);
         }
@@ -604,7 +992,10 @@ public class EsxMmlMapperService {
             String articleName,
             String fallbackConstructorLibId,
             Map<String, UUID> libIdToItem,
-            List<PendingRelation> pendingRelations
+            List<PendingRelation> pendingRelations,
+            Map<String, UUID> symbolCache,
+            Map<String, UUID> formatCache,
+            FileInsertStats insertStats
     ) {
         String patternLibId = firstNonBlank(patternEl.attributeValue("absolutepatternMMLId"), patternEl.attributeValue("MMLId"));
         if (patternLibId == null || patternLibId.isBlank()) return;
@@ -613,13 +1004,13 @@ public class EsxMmlMapperService {
         String notationLibId = buildNotationLibId(patternLibId, patternEl.getName(), patternEl.attributeValue("xmlid"));
         MappedMmlItem notationItem = buildSpecializedItem(patternEl, "notation", notationKind, notationLibId, articleName);
 
-        UUID notationItemId = upsertMmlItem(articleId, notationItem);
-        insertNotation(notationItemId, articleId, normalizeNotationKind(notationKind, patternEl));
+        UUID notationItemId = upsertMmlItem(articleId, notationItem, insertStats);
+        insertNotation(notationItemId, articleId, normalizeNotationKind(notationKind, patternEl), insertStats);
         if (notationItem.libId != null && !notationItem.libId.isBlank()) {
             libIdToItem.put(notationItem.libId, notationItemId);
         }
 
-        processNotationChildren(patternEl, notationItemId, articleId, libIdToItem, pendingRelations, fallbackConstructorLibId);
+        processNotationChildren(patternEl, notationItemId, articleId, libIdToItem, pendingRelations, fallbackConstructorLibId, symbolCache, formatCache, insertStats);
     }
 
     private String constructorKindFromDefinitionName(String definitionName) {
@@ -920,14 +1311,6 @@ public class EsxMmlMapperService {
         };
     }
 
-    private UUID findConstructorItemIdByLibId(String libId) {
-        return mmlDao.findConstructorItemIdByLibId(libId).orElse(null);
-    }
-
-    private boolean constructorExists(UUID constructorItemId) {
-        return mmlDao.constructorExists(constructorItemId);
-    }
-
     private List<String> findConstructorLibIds(Element itemEl) {
         List<String> lst = new ArrayList<>();
         List<org.dom4j.Node> nodes = itemEl.selectNodes(".//*[@absoluteconstrMMLId or @constr]");
@@ -994,20 +1377,40 @@ public class EsxMmlMapperService {
 
     // -------------------- Notation children: symbols / constructors / formats --------------------
 
-    private UUID insertSymbolIfAbsent(UUID articleId, String text) {
-        return mmlDao.insertSymbolIfAbsent(articleId, text);
+    private UUID insertSymbolIfAbsent(UUID articleId, String text, FileInsertStats stats) {
+        UpsertResult result = mmlDao.insertSymbolIfAbsent(articleId, text);
+        if (result.inserted()) {
+            stats.add(FileInsertStats.SYMBOL, 1);
+        }
+        return result.id();
     }
 
-    private void insertNotationSymbol(UUID notationItemId, UUID symbolId, int pos) {
-        mmlDao.insertNotationSymbol(notationItemId, symbolId, pos);
+    private UUID insertSymbolIfAbsentCached(UUID articleId, String text, Map<String, UUID> symbolCache, FileInsertStats stats) {
+        if (articleId == null || text == null || text.isBlank()) return null;
+        String key = articleId + "|" + text.trim();
+        return symbolCache.computeIfAbsent(key, ignored -> insertSymbolIfAbsent(articleId, text, stats));
     }
 
-    private void insertNotationConstructor(UUID notationItemId, UUID constructorItemId, String role) {
-        mmlDao.insertNotationConstructor(notationItemId, constructorItemId, role);
+    private void insertNotationSymbol(UUID notationItemId, UUID symbolId, int pos, FileInsertStats stats) {
+        stats.add(FileInsertStats.NOTATION_SYMBOL, mmlDao.insertNotationSymbol(notationItemId, symbolId, pos));
     }
 
-    private UUID upsertFormat(UUID articleId, String name, String representation) {
-        return mmlDao.upsertFormat(articleId, name, representation);
+    private void insertNotationConstructor(UUID notationItemId, UUID constructorItemId, String role, FileInsertStats stats) {
+        stats.add(FileInsertStats.NOTATION_CONSTRUCTOR, mmlDao.insertNotationConstructor(notationItemId, constructorItemId, role));
+    }
+
+    private UUID upsertFormat(UUID articleId, String name, String representation, FileInsertStats stats) {
+        UpsertResult result = mmlDao.upsertFormat(articleId, name, representation);
+        if (result.inserted()) {
+            stats.add(FileInsertStats.FORMAT, 1);
+        }
+        return result.id();
+    }
+
+    private UUID upsertFormatCached(UUID articleId, String name, String representation, Map<String, UUID> formatCache, FileInsertStats stats) {
+        if (articleId == null || name == null || name.isBlank()) return null;
+        String key = articleId + "|" + name.trim();
+        return formatCache.computeIfAbsent(key, ignored -> upsertFormat(articleId, name, representation, stats));
     }
 
     private void processNotationChildren(
@@ -1016,16 +1419,19 @@ public class EsxMmlMapperService {
             UUID articleId,
             Map<String, UUID> libIdToItem,
             List<PendingRelation> pendingRelations,
-            String fallbackConstructorLibId
+            String fallbackConstructorLibId,
+            Map<String, UUID> symbolCache,
+            Map<String, UUID> formatCache,
+            FileInsertStats insertStats
     ) {
         if (patternEl == null || notationItemId == null) return;
 
         int pos = 1;
         List<UUID> symbolIds = new ArrayList<>();
         for (String symbolText : extractNotationSymbols(patternEl)) {
-            UUID symbolId = insertSymbolIfAbsent(articleId, symbolText);
+            UUID symbolId = insertSymbolIfAbsentCached(articleId, symbolText, symbolCache, insertStats);
             if (symbolId == null) continue;
-            insertNotationSymbol(notationItemId, symbolId, pos++);
+            insertNotationSymbol(notationItemId, symbolId, pos++, insertStats);
             symbolIds.add(symbolId);
         }
 
@@ -1035,11 +1441,11 @@ public class EsxMmlMapperService {
             String name = el.attributeValue("formatnr");
             String repr = el.attributeValue("formatdes");
             if (name == null || name.isBlank()) continue;
-            UUID formatId = upsertFormat(articleId, name, repr);
+            UUID formatId = upsertFormatCached(articleId, name, repr, formatCache, insertStats);
             if (formatId == null) continue;
-            insertNotationFormat(notationItemId, formatId);
+            insertNotationFormat(notationItemId, formatId, insertStats);
             for (int i = 0; i < symbolIds.size(); i++) {
-                insertFormatSymbol(formatId, symbolIds.get(i), i + 1);
+                insertFormatSymbol(formatId, symbolIds.get(i), i + 1, insertStats);
             }
         }
 
@@ -1061,8 +1467,8 @@ public class EsxMmlMapperService {
         for (String constructorLibId : constructorLibIds) {
             pendingRelations.add(PendingRelation.notationConstructor(notationItemId, constructorLibId, "denotes"));
             UUID known = libIdToItem.get(constructorLibId);
-            if (known != null && constructorExists(known)) {
-                insertNotationConstructor(notationItemId, known, "denotes");
+            if (known != null) {
+                insertNotationConstructor(notationItemId, known, "denotes", insertStats);
             }
         }
     }
@@ -1086,6 +1492,247 @@ public class EsxMmlMapperService {
         }
 
         return new ArrayList<>(symbols);
+    }
+
+    // -------------------- Generic XML tag -> item_node mapping --------------------
+
+    private void mapAllItemNodes(
+            Element itemEl,
+            UUID itemId,
+            UUID articleId,
+            List<PendingRelation> pendingRelations,
+            Map<String, UUID> symbolCache,
+            Map<String, UUID> formatCache,
+            FileInsertStats insertStats
+    ) {
+        if (itemEl == null || itemId == null) {
+            return;
+        }
+        Map<String, UUID> symbols = (symbolCache == null) ? new ConcurrentHashMap<>() : symbolCache;
+        Map<String, UUID> formats = (formatCache == null) ? new ConcurrentHashMap<>() : formatCache;
+
+        String rootPath = "/" + itemEl.getName() + "[1]";
+        persistItemNodeRecursive(
+                itemEl,
+                itemId,
+                articleId,
+                null,
+                rootPath,
+                0,
+                1,
+                pendingRelations,
+                symbols,
+                formats,
+                insertStats
+        );
+    }
+
+    private void persistItemNodeRecursive(
+            Element nodeEl,
+            UUID itemId,
+            UUID articleId,
+            UUID parentNodeId,
+            String nodePath,
+            int depth,
+            int pos,
+            List<PendingRelation> pendingRelations,
+            Map<String, UUID> symbolCache,
+            Map<String, UUID> formatCache,
+            FileInsertStats insertStats
+    ) {
+        UUID nodeId = UUID.randomUUID();
+        String constructorLibId = extractConstructorLibIdFromNode(nodeEl);
+        UUID constructorItemId = null;
+        UUID symbolId = resolveSymbolIdForNode(nodeEl, articleId, symbolCache, insertStats);
+        UUID formatId = resolveFormatIdForNode(nodeEl, articleId, formatCache, insertStats);
+
+        insertItemNode(
+                nodeId,
+                itemId,
+                parentNodeId,
+                nodePath,
+                classifyItemNodeType(nodeEl, constructorLibId),
+                constructorItemId,
+                symbolId,
+                formatId,
+                pos,
+                depth,
+                abbreviateRawXml(nodeEl),
+                collectNodeDetails(nodeEl, constructorLibId),
+                insertStats
+        );
+
+        if (constructorLibId != null && !constructorLibId.isBlank()) {
+            pendingRelations.add(PendingRelation.itemNodeConstructor(nodeId, constructorLibId));
+        }
+
+        int childPos = 1;
+        for (Iterator<?> it = nodeEl.elementIterator(); it.hasNext(); ) {
+            Object o = it.next();
+            if (!(o instanceof Element child)) continue;
+            String childPath = nodePath + "/" + child.getName() + "[" + childPos + "]";
+            persistItemNodeRecursive(
+                    child,
+                    itemId,
+                    articleId,
+                    nodeId,
+                    childPath,
+                    depth + 1,
+                    childPos,
+                    pendingRelations,
+                    symbolCache,
+                    formatCache,
+                    insertStats
+            );
+            childPos++;
+        }
+    }
+
+    private UUID resolveSymbolIdForNode(
+            Element nodeEl,
+            UUID articleId,
+            Map<String, UUID> symbolCache,
+            FileInsertStats insertStats
+    ) {
+        if (nodeEl == null || articleId == null) {
+            return null;
+        }
+        String nodeName = nodeEl.getName();
+        if (nodeName == null || !nodeName.toLowerCase(Locale.ROOT).contains("symbol")) {
+            return null;
+        }
+        String symbolText = firstNonBlank(
+                nodeEl.attributeValue("spelling"),
+                nodeEl.attributeValue("name"),
+                nodeEl.getTextTrim()
+        );
+        if (symbolText == null || symbolText.isBlank()) {
+            return null;
+        }
+        return insertSymbolIfAbsentCached(articleId, symbolText, symbolCache, insertStats);
+    }
+
+    private UUID resolveFormatIdForNode(
+            Element nodeEl,
+            UUID articleId,
+            Map<String, UUID> formatCache,
+            FileInsertStats insertStats
+    ) {
+        if (nodeEl == null || articleId == null) {
+            return null;
+        }
+        String formatName = nodeEl.attributeValue("formatnr");
+        if (formatName == null || formatName.isBlank()) {
+            return null;
+        }
+        String representation = nodeEl.attributeValue("formatdes");
+        return upsertFormatCached(articleId, formatName, representation, formatCache, insertStats);
+    }
+
+    private String classifyItemNodeType(Element nodeEl, String constructorLibId) {
+        if (constructorLibId != null && !constructorLibId.isBlank()) {
+            return "constructor";
+        }
+        String name = nodeEl.getName() == null ? "" : nodeEl.getName().toLowerCase(Locale.ROOT);
+        if (name.contains("symbol")) {
+            return "symbol";
+        }
+        if (nodeEl.attributeValue("formatnr") != null || nodeEl.attributeValue("formatdes") != null) {
+            return "format";
+        }
+        if (name.contains("keyword")) {
+            return "keyword";
+        }
+        return "token";
+    }
+
+    private String extractConstructorLibIdFromNode(Element nodeEl) {
+        String constructorLibId = nodeEl.attributeValue("absoluteconstrMMLId");
+        if ((constructorLibId == null || constructorLibId.isBlank()) && looksLikeLibId(nodeEl.attributeValue("constr"))) {
+            constructorLibId = nodeEl.attributeValue("constr");
+        }
+        return (constructorLibId == null || constructorLibId.isBlank()) ? null : constructorLibId;
+    }
+
+    private Map<String, Object> collectNodeDetails(Element nodeEl, String constructorLibId) {
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("tag", nodeEl.getName());
+
+        Map<String, String> attrs = new LinkedHashMap<>();
+        for (Iterator<?> it = nodeEl.attributeIterator(); it.hasNext(); ) {
+            Object o = it.next();
+            if (!(o instanceof org.dom4j.Attribute attr)) continue;
+            attrs.put(attr.getName(), attr.getValue());
+        }
+        if (!attrs.isEmpty()) {
+            details.put("attrs", attrs);
+        }
+        if (constructorLibId != null) {
+            details.put("constructorLibId", constructorLibId);
+        }
+        return details;
+    }
+
+    private String abbreviateRawXml(Element nodeEl) {
+        if (nodeEl == null) {
+            return null;
+        }
+
+        String tag = nodeEl.getName();
+        if (tag == null || tag.isBlank()) {
+            return null;
+        }
+
+        StringBuilder sb = new StringBuilder(ITEM_NODE_RAW_MAX);
+        sb.append('<').append(tag);
+
+        for (Iterator<?> it = nodeEl.attributeIterator(); it.hasNext(); ) {
+            Object o = it.next();
+            if (!(o instanceof org.dom4j.Attribute attr)) continue;
+            String an = attr.getName();
+            if (an == null || an.isBlank()) continue;
+            String av = attr.getValue();
+            if (av == null) av = "";
+            sb.append(' ')
+                    .append(an)
+                    .append("=\"")
+                    .append(av
+                            .replace("&", "&amp;")
+                            .replace("\"", "&quot;")
+                            .replace("<", "&lt;")
+                            .replace(">", "&gt;"))
+                    .append('"');
+            if (sb.length() >= ITEM_NODE_RAW_MAX) {
+                return sb.substring(0, ITEM_NODE_RAW_MAX);
+            }
+        }
+
+        boolean hasChildren = nodeEl.elementIterator().hasNext();
+        String text = nodeEl.getTextTrim();
+        boolean hasText = text != null && !text.isBlank();
+
+        if (!hasChildren && hasText) {
+            if (text.length() > ITEM_NODE_TEXT_MAX) {
+                text = text.substring(0, ITEM_NODE_TEXT_MAX);
+            }
+            sb.append('>')
+                    .append(text
+                            .replace("&", "&amp;")
+                            .replace("<", "&lt;")
+                            .replace(">", "&gt;"))
+                    .append("</")
+                    .append(tag)
+                    .append('>');
+        } else if (hasChildren) {
+            sb.append(">...</").append(tag).append('>');
+        } else {
+            sb.append("/>");
+        }
+
+        if (sb.length() <= ITEM_NODE_RAW_MAX) {
+            return sb.toString();
+        }
+        return sb.substring(0, ITEM_NODE_RAW_MAX);
     }
 
     // -------------------- Utilities --------------------

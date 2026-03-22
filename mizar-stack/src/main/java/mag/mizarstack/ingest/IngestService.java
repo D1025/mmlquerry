@@ -271,6 +271,7 @@ public class IngestService {
                     .build();
 
             var paginator = s3.listObjectsV2Paginator(listReq);
+            List<String> esxKeys = new ArrayList<>();
 
             for (var page : paginator) {
                 for (S3Object obj : page.contents()) {
@@ -281,30 +282,41 @@ public class IngestService {
 
                     // Only process .esx files
                     if (!key.endsWith(".esx")) continue;
-
-                    seen++;
-                    
-                    if (seen % 50 == 0) {
-                        log.info("[Progress] Processed {} files...", seen);
-                    }
-
-                    try {
-                        IndexFileResult result = indexSingleS3File(key);
-                        
-                        if (result.isNewVersion()) {
-                            newVersions++;
-                            log.debug("  NEW: {} (versionId={})", key, result.versionId());
-                        }
-
-                        totalBytes += result.sizeBytes();
-                        processed++;
-
-                    } catch (Exception ex) {
-                        failed++;
-                        log.error("  FAILED {}", key, ex);
-                    }
+                    esxKeys.add(key);
                 }
             }
+
+            seen = esxKeys.size();
+            log.info("Discovered ESX files: {}", seen);
+
+            for (int i = 0; i < esxKeys.size(); i++) {
+                String key = esxKeys.get(i);
+                int current = i + 1;
+                log.info("[{}/{}] START {}", current, seen, key);
+
+                try {
+                    IndexFileResult result = indexSingleS3File(key, current, seen);
+
+                    if (result.isNewVersion()) {
+                        newVersions++;
+                    }
+
+                    totalBytes += result.sizeBytes();
+                    processed++;
+                    log.info("[{}/{}] DONE {} | bytes={} | newVersion={}",
+                            current, seen, key, formatBytes(result.sizeBytes()), result.isNewVersion());
+                } catch (Exception ex) {
+                    failed++;
+                    log.error("[{}/{}] FAILED {}", current, seen, key, ex);
+                }
+            }
+
+            Map<String, Integer> deferredFlush = esxMapper.flushDeferredRelations(message ->
+                    log.info("[deferred-relations] {}", message));
+            log.info("Deferred relations flush summary: resolved={} remaining={} passes={}",
+                    deferredFlush.getOrDefault("resolved", 0),
+                    deferredFlush.getOrDefault("remaining", 0),
+                    deferredFlush.getOrDefault("passes", 0));
 
             // Update ingest run with final statistics
             ingestRunDao.complete(runId, seen, processed, newVersions, totalBytes);
@@ -331,7 +343,7 @@ public class IngestService {
     /**
      * Index a single S3 file: create document version and parse to mizar_schema.
      */
-    private IndexFileResult indexSingleS3File(String s3Key) throws Exception {
+    private IndexFileResult indexSingleS3File(String s3Key, int currentFile, int totalFiles) throws Exception {
         // Fetch the file from S3
         GetObjectRequest req = GetObjectRequest.builder()
                 .bucket(bucket)
@@ -361,7 +373,7 @@ public class IngestService {
         
         if (existingVersionId.isPresent()) {
             // Already have this version - but still parse to mizar_schema
-            parseAndMapToMizarSchema(body, s3Key);
+            parseAndMapToMizarSchema(body, s3Key, currentFile, totalFiles);
             return new IndexFileResult(docId, existingVersionId.get(), false, body.length);
         }
 
@@ -379,7 +391,7 @@ public class IngestService {
         documentHeadDao.upsert(docId, versionId);
 
         // Parse and map ESX content to mizar_schema tables using dom4j
-        parseAndMapToMizarSchema(body, s3Key);
+        parseAndMapToMizarSchema(body, s3Key, currentFile, totalFiles);
 
         return new IndexFileResult(docId, versionId, true, body.length);
     }
@@ -387,16 +399,35 @@ public class IngestService {
     /**
      * Parse ESX XML and map to mizar_schema tables (article, mml_item, constructor, notation, etc.)
      */
-    private void parseAndMapToMizarSchema(byte[] body, String s3Key) {
+    private void parseAndMapToMizarSchema(byte[] body, String s3Key, int currentFile, int totalFiles) {
+        Instant mapStart = Instant.now();
         try {
-            var messages = new ArrayList<String>();
-            Map<String, Object> parseResult = esxMapper.processArticleXml(body, s3Key, messages::add);
-            log.debug("  Parsed {}: items={}, refs={}", 
-                    s3Key, 
-                    parseResult.get("processedItems"), 
-                    parseResult.get("pendingRefs"));
+            Map<String, Object> parseResult = esxMapper.processArticleXml(body, s3Key, message -> {
+                if (message == null) return;
+                if (message.startsWith("Processed items:")
+                        || message.startsWith("Resolved relations:")
+                        || message.startsWith("Mapper workers timeout")) {
+                    log.info("[{}/{}] {} :: {}", currentFile, totalFiles, s3Key, message);
+                }
+            });
+            int processedItems = toInt(parseResult.get("processedItems"));
+            int failedItems = toInt(parseResult.get("failedItems"));
+            int pendingRefs = toInt(parseResult.get("pendingRefs"));
+            Map<String, Long> insertedCounts = toLongMap(parseResult.get("insertedCounts"));
+            Duration mapDuration = Duration.between(mapStart, Instant.now());
+
+            log.info("[{}/{}] MAPPED {} | items={} | failedItems={} | pendingRefs={} | itemNodeLinks={} | inserted={} | duration={}",
+                    currentFile,
+                    totalFiles,
+                    s3Key,
+                    processedItems,
+                    failedItems,
+                    pendingRefs,
+                    formatItemNodeLinkCounts(insertedCounts),
+                    formatInsertedCounts(insertedCounts),
+                    formatDuration(mapDuration));
         } catch (Exception ex) {
-            log.warn("  ESX parsing warning for {}", s3Key, ex);
+            log.warn("[{}/{}] ESX parsing warning for {}", currentFile, totalFiles, s3Key, ex);
         }
     }
 
@@ -439,6 +470,67 @@ public class IngestService {
 
     // ==================== Helper Methods ====================
 
+    private static int toInt(Object value) {
+        if (value == null) return 0;
+        if (value instanceof Number n) return n.intValue();
+        try {
+            return Integer.parseInt(value.toString());
+        } catch (Exception ignored) {
+            return 0;
+        }
+    }
+
+    private static Map<String, Long> toLongMap(Object raw) {
+        Map<String, Long> out = new LinkedHashMap<>();
+        if (!(raw instanceof Map<?, ?> map)) {
+            return out;
+        }
+        for (Map.Entry<?, ?> e : map.entrySet()) {
+            if (e.getKey() == null) continue;
+            String key = e.getKey().toString();
+            long value = 0L;
+            if (e.getValue() instanceof Number n) {
+                value = n.longValue();
+            } else if (e.getValue() != null) {
+                try {
+                    value = Long.parseLong(e.getValue().toString());
+                } catch (Exception ignored) {
+                    value = 0L;
+                }
+            }
+            out.put(key, value);
+        }
+        return out;
+    }
+
+    private static String formatInsertedCounts(Map<String, Long> counts) {
+        if (counts == null || counts.isEmpty()) {
+            return "<none>";
+        }
+        List<String> parts = new ArrayList<>();
+        for (Map.Entry<String, Long> e : counts.entrySet()) {
+            parts.add(e.getKey() + "=" + e.getValue());
+        }
+        return String.join(", ", parts);
+    }
+
+    private static String formatItemNodeLinkCounts(Map<String, Long> counts) {
+        long constructorLinks = metric(counts, FileInsertStats.ITEM_NODE_WITH_CONSTRUCTOR);
+        long symbolLinks = metric(counts, FileInsertStats.ITEM_NODE_WITH_SYMBOL);
+        long formatLinks = metric(counts, FileInsertStats.ITEM_NODE_WITH_FORMAT);
+        return "constructor_item_id=" + constructorLinks
+                + ", symbol_id=" + symbolLinks
+                + ", format_id=" + formatLinks;
+    }
+
+    private static long metric(Map<String, Long> counts, String key) {
+        if (counts == null || key == null) {
+            return 0L;
+        }
+        Long value = counts.get(key);
+        return value == null ? 0L : value;
+    }
+
     private static String sha256Hex(byte[] data) throws Exception {
         byte[] hash = MessageDigest.getInstance("SHA-256").digest(data);
         return HexFormat.of().formatHex(hash);
@@ -473,35 +565,4 @@ public class IngestService {
         return String.format("%dh %dm %ds", seconds / 3600, (seconds % 3600) / 60, seconds % 60);
     }
 
-    // ==================== Result Records ====================
-
-    public record DownloadResult(
-            String tagName,
-            String s3Prefix,
-            int filesUploaded,
-            long bytesUploaded,
-            Duration duration
-    ) {}
-
-    public record IndexResult(
-            Long runId,
-            int filesSeen,
-            int filesProcessed,
-            int newVersions,
-            int filesFailed,
-            long totalBytes,
-            Duration duration
-    ) {}
-
-    public record FullIngestResult(
-            DownloadResult download,
-            IndexResult index
-    ) {}
-
-    private record IndexFileResult(
-            Long documentId,
-            Long versionId,
-            boolean isNewVersion,
-            long sizeBytes
-    ) {}
 }

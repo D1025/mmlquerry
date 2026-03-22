@@ -1,8 +1,14 @@
 package mag.mizarstack.ingest;
 
+import lombok.AccessLevel;
+import lombok.AllArgsConstructor;
+import lombok.experimental.FieldDefaults;
+
 import java.util.Map;
 import java.util.UUID;
 
+@AllArgsConstructor(access = AccessLevel.PRIVATE)
+@FieldDefaults(makeFinal = true, level = AccessLevel.PACKAGE)
 class PendingRelation {
     PendingRelationType type;
     UUID sourceItemId;
@@ -11,24 +17,6 @@ class PendingRelation {
     boolean isPositive;
     int occurrences;
     Map<String, Object> details;
-
-    private PendingRelation(
-            PendingRelationType type,
-            UUID sourceItemId,
-            String constructorLibId,
-            String role,
-            boolean isPositive,
-            int occurrences,
-            Map<String, Object> details
-    ) {
-        this.type = type;
-        this.sourceItemId = sourceItemId;
-        this.constructorLibId = constructorLibId;
-        this.role = role;
-        this.isPositive = isPositive;
-        this.occurrences = occurrences;
-        this.details = details;
-    }
 
     static PendingRelation itemConstructorRef(UUID sourceItemId, String constructorLibId, String role, boolean isPositive, int occurrences, Map<String, Object> details) {
         return new PendingRelation(PendingRelationType.ITEM_CONSTRUCTOR_REF, sourceItemId, constructorLibId, role, isPositive, occurrences, details);
@@ -48,5 +36,9 @@ class PendingRelation {
 
     static PendingRelation registrationRelation(UUID sourceItemId, String constructorLibId, String role, boolean isPositive) {
         return new PendingRelation(PendingRelationType.REGISTRATION_RELATION, sourceItemId, constructorLibId, role, isPositive, 1, null);
+    }
+
+    static PendingRelation itemNodeConstructor(UUID nodeId, String constructorLibId) {
+        return new PendingRelation(PendingRelationType.ITEM_NODE_CONSTRUCTOR, nodeId, constructorLibId, "node-constructor", true, 1, null);
     }
 }

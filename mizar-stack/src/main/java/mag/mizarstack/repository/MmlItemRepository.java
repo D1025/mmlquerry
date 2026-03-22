@@ -26,14 +26,4 @@ public interface MmlItemRepository extends JpaRepository<MmlItem, UUID> {
             @Param("subkind") String subkind,
             @Param("number") Integer number
     );
-
-    @Query(value = """
-            select m.id
-            from mml_item m
-            join constructor c on c.item_id = m.id
-            where m.lib_id = :libId
-            order by m.component_rank desc nulls last, m.id
-            limit 1
-            """, nativeQuery = true)
-    Optional<UUID> findBestConstructorItemIdByLibId(@Param("libId") String libId);
 }

@@ -2,7 +2,10 @@ package mag.mizarstack.web;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import mag.mizarstack.ingest.DownloadResult;
+import mag.mizarstack.ingest.FullIngestResult;
 import mag.mizarstack.ingest.IngestService;
+import mag.mizarstack.ingest.IndexResult;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.Map;
@@ -33,7 +36,7 @@ public class IngestController {
     public Map<String, Object> downloadFromGitHub() {
         log.info("Received request to download latest release from GitHub");
         
-        IngestService.DownloadResult result = ingestService.downloadLatestReleaseToS3();
+        DownloadResult result = ingestService.downloadLatestReleaseToS3();
         
         return Map.of(
                 "tagName", result.tagName(),
@@ -68,7 +71,7 @@ public class IngestController {
     public Map<String, Object> indexFromS3(@RequestParam String prefix) {
         log.info("Received request to index S3 prefix: {}", prefix);
         
-        IngestService.IndexResult result = ingestService.indexS3Prefix(prefix);
+        IndexResult result = ingestService.indexS3Prefix(prefix);
         
         return Map.of(
                 "runId", result.runId(),
@@ -101,7 +104,7 @@ public class IngestController {
     public Map<String, Object> fullIngest() {
         log.info("Received request for full ingest (download + index)");
         
-        IngestService.FullIngestResult result = ingestService.downloadAndIndex();
+        FullIngestResult result = ingestService.downloadAndIndex();
         
         return Map.of(
                 "download", Map.of(
