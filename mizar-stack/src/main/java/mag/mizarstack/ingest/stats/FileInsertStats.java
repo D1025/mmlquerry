@@ -1,4 +1,4 @@
-package mag.mizarstack.ingest;
+package mag.mizarstack.ingest.stats;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -83,3 +83,5 @@ public class FileInsertStats {
         return adder == null ? 0L : adder.sum();
     }
 }
+
+

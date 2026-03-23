@@ -1,4 +1,4 @@
-package mag.mizarstack.ingest;
+package mag.mizarstack.ingest.service;
 
 enum PendingRelationType {
     ITEM_CONSTRUCTOR_REF,
@@ -8,3 +8,5 @@ enum PendingRelationType {
     REGISTRATION_RELATION,
     ITEM_NODE_CONSTRUCTOR
 }
+
+

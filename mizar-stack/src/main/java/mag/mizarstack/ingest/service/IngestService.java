@@ -1,4 +1,4 @@
-package mag.mizarstack.ingest;
+package mag.mizarstack.ingest.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -7,6 +7,10 @@ import mag.mizarstack.dao.DocumentDao;
 import mag.mizarstack.dao.DocumentHeadDao;
 import mag.mizarstack.dao.DocumentVersionDao;
 import mag.mizarstack.dao.IngestRunDao;
+import mag.mizarstack.ingest.dto.DownloadResult;
+import mag.mizarstack.ingest.dto.FullIngestResult;
+import mag.mizarstack.ingest.dto.IndexResult;
+import mag.mizarstack.ingest.stats.FileInsertStats;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import software.amazon.awssdk.core.ResponseInputStream;
@@ -49,8 +53,7 @@ public class IngestService {
     private final String ghRepo;
     private final String ghToken;
     private final int timeoutMs;
-    
-    // DAOs for document versioning
+
     private final DocumentDao documentDao;
     private final DocumentVersionDao documentVersionDao;
     private final DocumentHeadDao documentHeadDao;
@@ -103,7 +106,6 @@ public class IngestService {
         }
 
         try {
-            // 1. Get latest release info
             String latestUrl = "https://api.github.com/repos/%s/releases/latest".formatted(ghRepo);
             HttpRequest.Builder reqBuilder = HttpRequest.newBuilder(URI.create(latestUrl))
                     .GET()
@@ -130,7 +132,6 @@ public class IngestService {
 
             log.info("Found release: {} (tag: {})", releaseName, tagName);
 
-            // 2. Download zipball
             String s3Prefix = "mizar-esx/releases/%s".formatted(tagName);
             log.info("S3 prefix will be: {}", s3Prefix);
 
@@ -140,7 +141,6 @@ public class IngestService {
                 throw new RuntimeException("Failed to download zipball: HTTP " + zipResp.statusCode());
             }
 
-            // 3. Extract and upload to S3
             int filesUploaded = 0;
             long bytesUploaded = 0;
             List<String> uploadedKeys = new ArrayList<>();
@@ -156,7 +156,6 @@ public class IngestService {
                     String fullName = entry.getName();
                     String rel = stripTopDir(fullName);
 
-                    // Only process .esx files from esx_mml or esx_abstr folders
                     if (!rel.endsWith(".esx")) {
                         zis.closeEntry();
                         continue;
@@ -177,8 +176,7 @@ public class IngestService {
                         }
 
                         String s3Key = s3Prefix + "/" + rel;
-                        
-                        // Upload to S3
+
                         s3.putObject(
                                 PutObjectRequest.builder()
                                         .bucket(bucket)
@@ -234,16 +232,13 @@ public class IngestService {
         return http.send(builder.build(), HttpResponse.BodyHandlers.ofInputStream());
     }
 
-    // ==================== S3 Indexing to mizar_schema ====================
-
     /**
      * Index all ESX files from an S3 prefix into mizar_schema tables.
      * Progress is printed to the console.
      */
     public IndexResult indexS3Prefix(String s3Prefix) {
         Instant start = Instant.now();
-        
-        // Auto-deduplicate prefix (handle cases like mizar-esx/mizar-esx/releases/...)
+
         if (s3Prefix.contains("mizar-esx/mizar-esx/")) {
             log.warn("Detected duplicate 'mizar-esx' in prefix, auto-deduplicating");
             s3Prefix = s3Prefix.replace("mizar-esx/mizar-esx/", "mizar-esx/");
@@ -254,7 +249,6 @@ public class IngestService {
         log.info("Bucket: {}", bucket);
         log.info("Prefix: {}", s3Prefix);
 
-        // Create ingest run record
         Long runId = ingestRunDao.create();
         log.info("Created ingest run ID: {}", runId);
 
@@ -277,10 +271,8 @@ public class IngestService {
                 for (S3Object obj : page.contents()) {
                     String key = obj.key();
 
-                    // Skip directory markers
                     if (key.endsWith("/")) continue;
 
-                    // Only process .esx files
                     if (!key.endsWith(".esx")) continue;
                     esxKeys.add(key);
                 }
@@ -344,7 +336,6 @@ public class IngestService {
      * Index a single S3 file: create document version and parse to mizar_schema.
      */
     private IndexFileResult indexSingleS3File(String s3Key, int currentFile, int totalFiles) throws Exception {
-        // Fetch the file from S3
         GetObjectRequest req = GetObjectRequest.builder()
                 .bucket(bucket)
                 .key(s3Key)
@@ -361,23 +352,18 @@ public class IngestService {
             throw new IllegalStateException("File has zero bytes");
         }
 
-        // Compute SHA-256 hash
         String sha256 = sha256Hex(body);
         String documentUrl = "s3://" + bucket + "/" + s3Key;
 
-        // Upsert document record (for versioning)
         Long docId = documentDao.upsert(documentUrl);
 
-        // Check if this version already exists
         Optional<Long> existingVersionId = documentVersionDao.findIdByDocumentIdAndSha256(docId, sha256);
         
         if (existingVersionId.isPresent()) {
-            // Already have this version - but still parse to mizar_schema
             parseAndMapToMizarSchema(body, s3Key, currentFile, totalFiles);
             return new IndexFileResult(docId, existingVersionId.get(), false, body.length);
         }
 
-        // Create new version
         Long versionId = documentVersionDao.insert(
                 docId,
                 null,
@@ -387,10 +373,8 @@ public class IngestService {
                 s3Key
         );
 
-        // Update document head to point to new version
         documentHeadDao.upsert(docId, versionId);
 
-        // Parse and map ESX content to mizar_schema tables using dom4j
         parseAndMapToMizarSchema(body, s3Key, currentFile, totalFiles);
 
         return new IndexFileResult(docId, versionId, true, body.length);
@@ -431,8 +415,6 @@ public class IngestService {
         }
     }
 
-    // ==================== Combined: Download + Index ====================
-
     /**
      * Download latest release from GitHub to S3, then index all files to mizar_schema.
      *
@@ -450,12 +432,8 @@ public class IngestService {
      */
     public FullIngestResult downloadAndIndex() {
         log.info("=== Full Ingest: Download + Index ===");
-        
-        // Step 1: Download from GitHub to S3
+
         DownloadResult downloadResult = downloadLatestReleaseToS3();
-        
-        // Step 2: Index from S3 to mizar_schema
-        // Index esx_mml folder (automatically appends /esx_mml to the s3Prefix)
         String esxMmlPrefix = downloadResult.s3Prefix() + "/esx_mml";
         IndexResult indexResult = indexS3Prefix(esxMmlPrefix);
         
@@ -566,3 +544,5 @@ public class IngestService {
     }
 
 }
+
+

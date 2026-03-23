@@ -1,4 +1,4 @@
-package mag.mizarstack.ingest;
+package mag.mizarstack.ingest.service;
 
 import lombok.AccessLevel;
 import lombok.AllArgsConstructor;
@@ -42,3 +42,5 @@ class PendingRelation {
         return new PendingRelation(PendingRelationType.ITEM_NODE_CONSTRUCTOR, nodeId, constructorLibId, "node-constructor", true, 1, null);
     }
 }
+
+

@@ -1,4 +1,4 @@
-package mag.mizarstack.ingest;
+package mag.mizarstack.ingest.service;
 
 record IndexFileResult(
         Long documentId,
@@ -7,4 +7,6 @@ record IndexFileResult(
         long sizeBytes
 ) {
 }
+
+
 

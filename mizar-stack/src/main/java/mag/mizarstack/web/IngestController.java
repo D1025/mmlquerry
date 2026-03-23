@@ -2,10 +2,10 @@ package mag.mizarstack.web;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import mag.mizarstack.ingest.DownloadResult;
-import mag.mizarstack.ingest.FullIngestResult;
-import mag.mizarstack.ingest.IngestService;
-import mag.mizarstack.ingest.IndexResult;
+import mag.mizarstack.ingest.dto.DownloadResult;
+import mag.mizarstack.ingest.dto.FullIngestResult;
+import mag.mizarstack.ingest.dto.IndexResult;
+import mag.mizarstack.ingest.service.IngestService;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.Map;

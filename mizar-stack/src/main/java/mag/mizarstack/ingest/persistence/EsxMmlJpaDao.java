@@ -1,4 +1,4 @@
-package mag.mizarstack.ingest;
+package mag.mizarstack.ingest.persistence;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -9,6 +9,7 @@ import mag.mizarstack.entity.Article;
 import mag.mizarstack.entity.Format;
 import mag.mizarstack.entity.MmlItem;
 import mag.mizarstack.entity.Symbol;
+import mag.mizarstack.ingest.dto.MappedMmlItem;
 import mag.mizarstack.repository.ArticleRepository;
 import mag.mizarstack.repository.ConstructorRepository;
 import mag.mizarstack.repository.FormatRepository;
@@ -32,7 +33,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
-import static mag.mizarstack.ingest.EsxMmlSqlQueries.*;
+import static mag.mizarstack.ingest.persistence.EsxMmlSqlQueries.*;
 
 @Repository
 @RequiredArgsConstructor
@@ -524,3 +525,5 @@ public class EsxMmlJpaDao {
         }
     }
 }
+
+

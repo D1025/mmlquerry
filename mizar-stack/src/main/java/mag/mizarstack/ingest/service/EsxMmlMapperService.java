@@ -1,6 +1,10 @@
-package mag.mizarstack.ingest;
+package mag.mizarstack.ingest.service;
 
 import lombok.extern.slf4j.Slf4j;
+import mag.mizarstack.ingest.dto.MappedMmlItem;
+import mag.mizarstack.ingest.persistence.EsxMmlJpaDao;
+import mag.mizarstack.ingest.persistence.UpsertResult;
+import mag.mizarstack.ingest.stats.FileInsertStats;
 import org.dom4j.Element;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -51,6 +55,12 @@ public class EsxMmlMapperService {
     private static final int ITEM_NODE_TEXT_MAX = 256;
     private static final int DEFERRED_RESOLVE_INTERVAL_FILES = 25;
     private static final int DEFERRED_RESOLVE_BATCH_SIZE = 20_000;
+    private static final String NODE_TYPE_THEOREMS = "theorems";
+    private static final String NODE_TYPE_DEFINITIONS = "definitions";
+    private static final String NODE_TYPE_SCHEMES = "schemes";
+    private static final String NODE_TYPE_REGISTRATIONS = "registrations";
+    private static final String NODE_TYPE_SYMBOLS = "symbols";
+    private static final String NODE_TYPE_NO_NODES = "no_nodes";
 
     private final EsxMmlJpaDao mmlDao;
     private final TransactionTemplate txTemplate;
@@ -471,8 +481,11 @@ public class EsxMmlMapperService {
                         libIdToItem.put(statementItem.libId, statementItemId);
                     }
 
+                    String statementKind = normalizeStatementKind(statementItem.subKind);
+                    String rootNodeType = classifyRootItemNodeType(itemEl, statementKind);
+
                     try {
-                        insertStatement(statementItemId, normalizeStatementKind(statementItem.subKind), statementItem.textContent, insertStats);
+                        insertStatement(statementItemId, statementKind, statementItem.textContent, insertStats);
                     } catch (Exception ignore) {
                     }
 
@@ -481,6 +494,7 @@ public class EsxMmlMapperService {
                             itemEl,
                             statementItemId,
                             articleId,
+                            rootNodeType,
                             pendingRelations,
                             symbolCache,
                             formatCache,
@@ -855,7 +869,7 @@ public class EsxMmlMapperService {
     }
 
     private boolean isClusterItemKind(String itemKind) {
-        return "Cluster".equals(itemKind);
+        return itemKind != null && "cluster".equalsIgnoreCase(itemKind);
     }
 
     private void processDefinitionItem(
@@ -1198,6 +1212,7 @@ public class EsxMmlMapperService {
 
         return 0;
     }
+
     private String guessItemKind(Element itemEl) {
         // In ESX, <Item kind="Regular-Statement"> etc. Only statements are wrapped in <Item>.
         // Constructors/notations/registrations exist as nested elements.
@@ -1266,7 +1281,6 @@ public class EsxMmlMapperService {
         if (raw.contains("struct")) return "structnot";
         if (raw.contains("aggr") || raw.contains("aggregate")) return "aggrnot";
 
-        // Jeżeli w środku są wzorce, możemy też zgadnąć po nazwach elementów
         if (itemEl.selectSingleNode(".//Attribute-Pattern") != null) return "attrnot";
         if (itemEl.selectSingleNode(".//Functor-Pattern") != null) return "funcnot";
         if (itemEl.selectSingleNode(".//Mode-Pattern") != null) return "modenot";
@@ -1500,6 +1514,7 @@ public class EsxMmlMapperService {
             Element itemEl,
             UUID itemId,
             UUID articleId,
+            String rootNodeType,
             List<PendingRelation> pendingRelations,
             Map<String, UUID> symbolCache,
             Map<String, UUID> formatCache,
@@ -1520,6 +1535,7 @@ public class EsxMmlMapperService {
                 rootPath,
                 0,
                 1,
+                rootNodeType,
                 pendingRelations,
                 symbols,
                 formats,
@@ -1535,6 +1551,7 @@ public class EsxMmlMapperService {
             String nodePath,
             int depth,
             int pos,
+            String rootNodeType,
             List<PendingRelation> pendingRelations,
             Map<String, UUID> symbolCache,
             Map<String, UUID> formatCache,
@@ -1551,7 +1568,7 @@ public class EsxMmlMapperService {
                 itemId,
                 parentNodeId,
                 nodePath,
-                classifyItemNodeType(nodeEl, constructorLibId),
+                classifyItemNodeType(nodeEl, symbolId, rootNodeType, depth),
                 constructorItemId,
                 symbolId,
                 formatId,
@@ -1579,6 +1596,7 @@ public class EsxMmlMapperService {
                     childPath,
                     depth + 1,
                     childPos,
+                    rootNodeType,
                     pendingRelations,
                     symbolCache,
                     formatCache,
@@ -1629,21 +1647,54 @@ public class EsxMmlMapperService {
         return upsertFormatCached(articleId, formatName, representation, formatCache, insertStats);
     }
 
-    private String classifyItemNodeType(Element nodeEl, String constructorLibId) {
-        if (constructorLibId != null && !constructorLibId.isBlank()) {
-            return "constructor";
+    private String classifyItemNodeType(Element nodeEl, UUID symbolId, String rootNodeType, int depth) {
+        if (isSymbolNodeType(nodeEl, symbolId)) {
+            return NODE_TYPE_SYMBOLS;
         }
-        String name = nodeEl.getName() == null ? "" : nodeEl.getName().toLowerCase(Locale.ROOT);
-        if (name.contains("symbol")) {
-            return "symbol";
+        if (depth == 0 && rootNodeType != null && !rootNodeType.isBlank()) {
+            return rootNodeType;
         }
-        if (nodeEl.attributeValue("formatnr") != null || nodeEl.attributeValue("formatdes") != null) {
-            return "format";
+        return NODE_TYPE_NO_NODES;
+    }
+
+    private String classifyRootItemNodeType(Element itemEl, String statementKind) {
+        if (itemEl == null) {
+            return NODE_TYPE_NO_NODES;
         }
-        if (name.contains("keyword")) {
-            return "keyword";
+
+        String itemKind = Optional.ofNullable(itemEl.attributeValue("kind")).orElse("");
+        String lowerKind = itemKind.toLowerCase(Locale.ROOT);
+
+        if (isClusterItemKind(itemKind) || lowerKind.contains("registration")) {
+            return NODE_TYPE_REGISTRATIONS;
         }
-        return "token";
+        if (lowerKind.contains("scheme")) {
+            return NODE_TYPE_SCHEMES;
+        }
+        if (lowerKind.contains("definition")) {
+            return NODE_TYPE_DEFINITIONS;
+        }
+        if ("theorem-item".equals(lowerKind) || "regular-statement".equals(lowerKind) || lowerKind.contains("theorem")) {
+            return NODE_TYPE_THEOREMS;
+        }
+
+        if ("sch".equals(statementKind)) {
+            return NODE_TYPE_SCHEMES;
+        }
+        if ("def".equals(statementKind) || "dfs".equals(statementKind)) {
+            return NODE_TYPE_DEFINITIONS;
+        }
+        return NODE_TYPE_NO_NODES;
+    }
+
+    private boolean isSymbolNodeType(Element nodeEl, UUID symbolId) {
+        if (symbolId != null) {
+            return true;
+        }
+        if (nodeEl == null || nodeEl.getName() == null) {
+            return false;
+        }
+        return nodeEl.getName().toLowerCase(Locale.ROOT).contains("symbol");
     }
 
     private String extractConstructorLibIdFromNode(Element nodeEl) {
@@ -1745,4 +1796,3 @@ public class EsxMmlMapperService {
     }
 
 }
-

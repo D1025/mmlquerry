@@ -1,4 +1,4 @@
-package mag.mizarstack.ingest;
+package mag.mizarstack.ingest.persistence;
 
 import lombok.AccessLevel;
 import lombok.NoArgsConstructor;
@@ -152,3 +152,5 @@ final class EsxMmlSqlQueries {
             on conflict (notation_item_id, constructor_item_id) do nothing
             """;
 }
+
+

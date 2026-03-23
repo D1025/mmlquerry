@@ -1,4 +1,4 @@
-package mag.mizarstack.ingest;
+package mag.mizarstack.ingest.dto;
 
 import java.time.Duration;
 
@@ -12,4 +12,6 @@ public record IndexResult(
         Duration duration
 ) {
 }
+
+
 

@@ -15,7 +15,6 @@ public class ApiExceptionHandler {
 
     @ExceptionHandler(Exception.class)
     public ResponseEntity<Map<String, Object>> handleAny(Exception ex) {
-        // Always log full stacktrace. Without this, users often only see a long Spring MVC stack.
         log.error("Unhandled exception", ex);
 
         Map<String, Object> body = Map.of(
