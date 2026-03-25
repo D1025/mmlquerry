@@ -33,11 +33,13 @@ public class EsxMmlMapperService {
     // Prefer exact-case match used in ESX files (<Item ...>)
     private static final String ITEM_XPATH = "//Item";
     private static final Set<String> DEFINITION_ITEM_KINDS = Set.of(
-            "Attribute-Definition",
-            "Functor-Definition",
-            "Predicate-Definition",
-            "Structure-Definition",
-            "Mode-Definition"
+            "attribute-definition",
+            "functor-definition",
+            "predicate-definition",
+            "structure-definition",
+            "mode-definition",
+            "selector-definition",
+            "aggregate-definition"
     );
     private static final Set<String> NOTATION_PATTERN_NAMES = Set.of(
             "Attribute-Pattern",
@@ -510,8 +512,17 @@ public class EsxMmlMapperService {
                     if (isDefinitionItemKind(itemKind)) {
                         processDefinitionItem(itemEl, itemKind, articleId, articleName, statementItemId, libIdToItem, pendingRelations, symbolCache, formatCache, insertStats);
                     }
-                    if (isClusterItemKind(itemKind)) {
-                        processRegistrationItem(itemEl, articleId, articleName, libIdToItem, pendingRelations, insertStats);
+                    if (isRegistrationItemKind(itemKind)) {
+                        processRegistrationItem(
+                                itemEl,
+                                articleId,
+                                articleName,
+                                libIdToItem,
+                                pendingRelations,
+                                symbolCache,
+                                formatCache,
+                                insertStats
+                        );
                     }
 
                     int count = parsedItems.incrementAndGet();
@@ -865,11 +876,19 @@ public class EsxMmlMapperService {
     }
 
     private boolean isDefinitionItemKind(String itemKind) {
-        return itemKind != null && DEFINITION_ITEM_KINDS.contains(itemKind);
+        return itemKind != null && DEFINITION_ITEM_KINDS.contains(itemKind.toLowerCase(Locale.ROOT));
     }
 
     private boolean isClusterItemKind(String itemKind) {
         return itemKind != null && "cluster".equalsIgnoreCase(itemKind);
+    }
+
+    private boolean isRegistrationItemKind(String itemKind) {
+        if (itemKind == null) {
+            return false;
+        }
+        String lowerKind = itemKind.toLowerCase(Locale.ROOT);
+        return "cluster".equals(lowerKind) || lowerKind.contains("registration");
     }
 
     private void processDefinitionItem(
@@ -914,21 +933,39 @@ public class EsxMmlMapperService {
             String articleName,
             Map<String, UUID> libIdToItem,
             List<PendingRelation> pendingRelations,
+            Map<String, UUID> symbolCache,
+            Map<String, UUID> formatCache,
             FileInsertStats insertStats
     ) {
-        Element clusterEl = firstDirectChildByName(itemEl, "Cluster");
-        if (clusterEl == null) return;
-
         Element registrationEl = null;
-        for (Iterator<?> it = clusterEl.elementIterator(); it.hasNext(); ) {
-            Object o = it.next();
-            if (!(o instanceof Element e)) continue;
-            String n = e.getName();
-            if (equalsAnyIgnoreCase(n, "Conditional-Registration", "Existential-Registration", "Functorial-Registration")) {
-                registrationEl = e;
-                break;
+        if (isRegistrationElementName(itemEl.getName())) {
+            registrationEl = itemEl;
+        }
+
+        if (registrationEl == null) {
+            Element clusterEl = firstDirectChildByName(itemEl, "Cluster");
+            Element searchRoot = (clusterEl == null) ? itemEl : clusterEl;
+            for (Iterator<?> it = searchRoot.elementIterator(); it.hasNext(); ) {
+                Object o = it.next();
+                if (!(o instanceof Element e)) continue;
+                if (isRegistrationElementName(e.getName())) {
+                    registrationEl = e;
+                    break;
+                }
             }
         }
+
+        if (registrationEl == null) {
+            List<org.dom4j.Node> descendants = itemEl.selectNodes(".//*");
+            for (org.dom4j.Node n : descendants) {
+                if (!(n instanceof Element e)) continue;
+                if (isRegistrationElementName(e.getName())) {
+                    registrationEl = e;
+                    break;
+                }
+            }
+        }
+
         if (registrationEl == null) return;
 
         String regKind = registrationKindFromElementName(registrationEl.getName());
@@ -940,6 +977,18 @@ public class EsxMmlMapperService {
         if (regItem.libId != null && !regItem.libId.isBlank()) {
             libIdToItem.put(regItem.libId, registrationItemId);
         }
+
+        // Persist registration subtree under registration item id so registration views can classify roots correctly.
+        mapAllItemNodes(
+                registrationEl,
+                registrationItemId,
+                articleId,
+                NODE_TYPE_REGISTRATIONS,
+                pendingRelations,
+                symbolCache,
+                formatCache,
+                insertStats
+        );
 
         List<org.dom4j.Node> refNodes = registrationEl.selectNodes(".//*[@absoluteconstrMMLId]");
         for (org.dom4j.Node n : refNodes) {
@@ -1059,6 +1108,10 @@ public class EsxMmlMapperService {
             case "functorial-registration" -> "funcreg";
             default -> "condreg";
         };
+    }
+
+    private boolean isRegistrationElementName(String elementName) {
+        return equalsAnyIgnoreCase(elementName, "Conditional-Registration", "Existential-Registration", "Functorial-Registration");
     }
 
     private String deriveRegistrationRole(Element refEl) {
