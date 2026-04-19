@@ -1,170 +1,221 @@
 grammar MmlQuery;
 
-// Top-level query rule
-query : list
-      | itemQuery
-      | compoundQuery
-      | contextQuery
-      | operationQuery
-      | selectiveQuery
-      ;
+query
+    : expression EOF
+    ;
 
-// List queries (all items of a type)
-list : globalList
-     | qualifiedList
-     ;
+expression
+    : orExpression
+    ;
 
-globalList : LIST '<' listItemKind '>'
-           ;
+orExpression
+    : andExpression ((OR | BUTNOT) andExpression)*
+    ;
 
-qualifiedList : LIST '<' itemKind '>' 'in' listSource
-              ;
+andExpression
+    : unaryExpression (AND unaryExpression)*
+    ;
 
-listItemKind : 'constructors'
-             | 'theorems'
-             | 'definitions'
-             | 'statements'
-             | 'registrations'
-             | 'all'
-             ;
+unaryExpression
+    : NOT unaryExpression
+    | pipelineExpression
+    ;
 
-itemKind : 'func' | 'pred' | 'attr' | 'mode' | 'sel' | 'aggr' | 'struct'
-         | 'th' | 'def' | 'dfs' | 'sch'
-         ;
+pipelineExpression
+    : atomExpression (PIPE operationExpression)*
+    ;
 
-listSource : articleName
-           | '*'
-           ;
+atomExpression
+    : LPAREN expression RPAREN
+    | theoremInfixExpression
+    | listExpression
+    | constructorExpression
+    | articleExpression
+    ;
 
-// Article-specific queries
-articleList : ARTICLE articleName
-            ;
+theoremInfixExpression
+    : LIST OF THEOREM (IN listSource)? WHERE propositionInfixPredicate AND propositionInfixPredicate
+    ;
 
-symbolList : SYMBOL TEXT
-           ;
+propositionInfixPredicate
+    : PROPOSITION HAS INFIX_TERM (LBRACK ABSOLUTEPATTERNMMLID_ATTR EQ stringLiteral RBRACK)?
+    ;
 
-formatList : FORMAT TEXT
-           ;
+listExpression
+    : LIST OF listType (IN listSource)?
+    ;
 
-keywordList : KEYWORD TEXT
-            ;
+listType
+    : CONSTRUCTOR
+    | THEOREM
+    | DEFINITION
+    | STATEMENT
+    | REGISTRATION
+    | ALL
+    ;
 
-nonQualifiedList : TEXT
-                 ;
+listSource
+    : ARTICLE_NAME
+    | STAR
+    ;
 
-// Enumerated list (explicit constructor references)
-enumeratedList : '{' constructorItem (',' constructorItem)* '}'
-               ;
+constructorExpression
+    : ARTICLE_NAME COLON itemKind NUMBER
+    ;
 
-// Item queries (specific items)
-itemQuery : constructor
-          | constructorAbbreviation
-          | constructorRelatives
-          | articleQuery
-          | groupQuery
-          ;
+articleExpression
+    : ARTICLE ARTICLE_NAME
+    ;
 
-constructor : articleName ':' itemKind NUMBER
-            ;
+itemKind
+    : FUNC
+    | PRED
+    | ATTR
+    | MODE
+    | SEL
+    | AGGR
+    | STRUCT
+    | TH
+    | DEF
+    | DFS
+    | SCH
+    ;
 
-constructorAbbreviation : articleName ':' constructorRelatives
-                        ;
+operationExpression
+    : REF                                         # opRef
+    | OCCUR                                       # opOccur
+    | DEFINITION                                  # opDefinition
+    | NOTATION                                    # opNotation
+    | REDEF                                       # opRedef
+    | ORIGIN                                      # opOrigin
+    | COPY                                        # opCopy
+    | TERMTYPE REF                                # opTermTypeRef
+    | DEFTYPE REF                                 # opDefTypeRef
+    | MAIN MODE                                   # opMainMode
+    | MAIN FUNCTOR                                # opMainFunctor
+    | FILTER LPAREN stringLiteral RPAREN          # opFilter
+    | GREP LPAREN stringLiteral RPAREN            # opGrep
+    | REVERSE                                     # opReverse
+    | INVERT                                      # opInvert
+    | cardinalityOperation                        # opCardinality
+    ;
 
-constructorRelatives : itemKind NUMBER
-                     ;
+cardinalityOperation
+    : WHEREEQ LPAREN operationName COMMA NUMBER RPAREN   # opWhereEq
+    | WHEREGE LPAREN operationName COMMA NUMBER RPAREN   # opWhereGe
+    | WHERELE LPAREN operationName COMMA NUMBER RPAREN   # opWhereLe
+    | WHEREGT LPAREN operationName COMMA NUMBER RPAREN   # opWhereGt
+    | WHERELT LPAREN operationName COMMA NUMBER RPAREN   # opWhereLt
+    ;
 
-articleQuery : ARTICLE articleName
-             ;
+operationName
+    : REF
+    | OCCUR
+    | DEFINITION
+    | NOTATION
+    | TERMTYPE REF
+    | DEFTYPE REF
+    ;
 
-groupQuery : FORALL query
-           | EXISTS query
-           | NOT query
-           ;
+stringLiteral
+    : STRING
+    ;
 
-constructorItem : articleName ':' itemKind NUMBER
-                ;
+LIST: L I S T;
+OF: O F;
+IN: I N;
+WHERE: W H E R E;
+ARTICLE: A R T I C L E;
+PROPOSITION: P R O P O S I T I O N;
+HAS: H A S;
+INFIX_TERM: I N F I X '-' T E R M;
+ABSOLUTEPATTERNMMLID_ATTR: A B S O L U T E P A T T E R N M M L I D;
+AND: A N D;
+OR: O R;
+BUTNOT: B U T N O T;
+NOT: N O T;
+PIPE: '|';
+STAR: '*';
+COMMA: ',';
+COLON: ':';
+LPAREN: '(';
+RPAREN: ')';
+LBRACK: '[';
+RBRACK: ']';
+EQ: '=';
 
-// Compound queries (combining queries)
-compoundQuery : query AND query
-              | query OR query
-              | NOT query
-              ;
+CONSTRUCTOR: C O N S T R U C T O R S?;
+THEOREM: T H E O R E M S?;
+DEFINITION: D E F I N I T I O N S?;
+STATEMENT: S T A T E M E N T S?;
+REGISTRATION: R E G I S T R A T I O N S?;
+ALL: A L L;
 
-// Context queries (with constraints)
-contextQuery : query WHERE TEXT
-             ;
+REF: R E F;
+OCCUR: O C C U R S?;
+NOTATION: N O T A T I O N;
+REDEF: R E D E F | R E D E F I N I T I O N;
+ORIGIN: O R I G I N | O R I G I N A L;
+COPY: C O P Y | C O P I E D;
+TERMTYPE: T E R M T Y P E;
+DEFTYPE: D E F T Y P E;
+MAIN: M A I N;
+FUNCTOR: F U N C T O R;
+FILTER: F I L T E R;
+GREP: G R E P;
+REVERSE: R E V E R S E;
+INVERT: I N V E R T;
+WHEREEQ: W H E R E E Q;
+WHEREGE: W H E R E G E;
+WHERELE: W H E R E L E;
+WHEREGT: W H E R E G T;
+WHERELT: W H E R E L T;
 
-// Operation queries
-operationQuery : query operation
-               ;
+FUNC: F U N C;
+PRED: P R E D;
+ATTR: A T T R;
+MODE: M O D E;
+SEL: S E L;
+AGGR: A G G R;
+STRUCT: S T R U C T;
+TH: T H;
+DEF: D E F;
+DFS: D F S;
+SCH: S C H;
 
-operation : basicOperation
-          | filterOperation
-          | grepOperation
-          | reverseOperation
-          | compoundOperation
-          ;
+ARTICLE_NAME: [A-Z] [A-Z0-9_]*;
+NUMBER: [0-9]+;
+STRING
+    : '\'' (~['\\] | '\\' .)* '\''
+    | '"' (~["\\] | '\\' .)* '"'
+    ;
 
-basicOperation : OCCUR
-               | DEFINITION
-               | NOTATION
-               | REDEF
-               | ORIGIN
-               | COPY
-               | 'termtype' 'ref'
-               | 'deftype' 'ref'
-               | 'main' 'mode'
-               | 'main' 'functor'
-               ;
+WS: [ \t\r\n]+ -> skip;
 
-filterOperation : FILTER TEXT
-                ;
-
-grepOperation : GREP TEXT
-              ;
-
-reverseOperation : REVERSE
-                 | INVERT
-                 ;
-
-compoundOperation : operation ('|' | '&' | '|') operation
-                  ;
-
-// Selective queries
-selectiveQuery : query WHERE TEXT
-               ;
-
-// Identifiers and literals
-articleName : ARTICLE_NAME
-            ;
-
-ARTICLE : 'article' | 'Article' | 'ARTICLE' ;
-LIST : 'list' | 'List' | 'LIST' ;
-FORALL : 'forall' | 'all' ;
-EXISTS : 'exists' | 'some' ;
-NOT : 'not' | '~' | '!' ;
-AND : 'and' | '&' | '&&' ;
-OR : 'or' | '|' | '||' ;
-WHERE : 'where' | 'with' ;
-SYMBOL : 'symbol' | 'Symbol' ;
-FORMAT : 'format' | 'Format' ;
-KEYWORD : 'keyword' | 'Keyword' ;
-FILTER : 'filter' | 'Filter' ;
-GREP : 'grep' | 'Grep' ;
-OCCUR : 'occur' | 'occurs' | 'occurrence' ;
-DEFINITION : 'definition' | 'def' ;
-NOTATION : 'notation' | 'not' ;
-REDEF : 'redef' | 'redefinition' ;
-ORIGIN : 'origin' | 'original' ;
-COPY : 'copy' | 'copied' ;
-REVERSE : 'reverse' ;
-INVERT : 'invert' ;
-ARTICLE_NAME : [A-Z][A-Z0-9_]* ;
-NUMBER : [0-9]+ ;
-TEXT : '"' (~["])* '"'
-     | '\'' (~['\''])* '\''
-     | [a-zA-Z_][a-zA-Z0-9_]*
-     ;
-
-WS : [ \t\r\n]+ -> skip ;
+fragment A: [aA];
+fragment B: [bB];
+fragment C: [cC];
+fragment D: [dD];
+fragment E: [eE];
+fragment F: [fF];
+fragment G: [gG];
+fragment H: [hH];
+fragment I: [iI];
+fragment J: [jJ];
+fragment K: [kK];
+fragment L: [lL];
+fragment M: [mM];
+fragment N: [nN];
+fragment O: [oO];
+fragment P: [pP];
+fragment Q: [qQ];
+fragment R: [rR];
+fragment S: [sS];
+fragment T: [tT];
+fragment U: [uU];
+fragment V: [vV];
+fragment W: [wW];
+fragment X: [xX];
+fragment Y: [yY];
+fragment Z: [zZ];
 

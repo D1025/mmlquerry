@@ -33,6 +33,7 @@ public class EsxMmlMapperService {
     // Prefer exact-case match used in ESX files (<Item ...>)
     private static final String ITEM_XPATH = "//Item";
     private static final Set<String> DEFINITION_ITEM_KINDS = Set.of(
+            "definition-item",
             "attribute-definition",
             "functor-definition",
             "predicate-definition",
@@ -40,6 +41,15 @@ public class EsxMmlMapperService {
             "mode-definition",
             "selector-definition",
             "aggregate-definition"
+    );
+    private static final Set<String> CONSTRUCTOR_DEFINITION_ELEMENT_NAMES = Set.of(
+            "Attribute-Definition",
+            "Functor-Definition",
+            "Predicate-Definition",
+            "Structure-Definition",
+            "Mode-Definition",
+            "Selector-Definition",
+            "Aggregate-Definition"
     );
     private static final Set<String> NOTATION_PATTERN_NAMES = Set.of(
             "Attribute-Pattern",
@@ -156,8 +166,11 @@ public class EsxMmlMapperService {
         // libId -> mml_item.id
         Map<String, UUID> libIdToItem = new ConcurrentHashMap<>();
         List<PendingRelation> pendingRelations = Collections.synchronizedList(new ArrayList<>());
-        Map<String, UUID> symbolCache = new ConcurrentHashMap<>();
-        Map<String, UUID> formatCache = new ConcurrentHashMap<>();
+        // Shared caches are safe in single-thread mode.
+        // With parallel workers they can leak uncommitted IDs across transactions
+        // and cause FK violations (e.g. notation_symbol -> symbol).
+        Map<String, UUID> symbolCache = (mapperWorkerThreads <= 1) ? new ConcurrentHashMap<>() : null;
+        Map<String, UUID> formatCache = (mapperWorkerThreads <= 1) ? new ConcurrentHashMap<>() : null;
 
         final List<String> finalMessages = Collections.synchronizedList((messages == null) ? new ArrayList<>() : messages);
 
@@ -185,6 +198,9 @@ public class EsxMmlMapperService {
 
             m.accept("Article context (fallback): " + fallbackArticle + " (id=" + fallbackArticleId + ")");
             m.accept("Mapper workers: " + mapperWorkerThreads);
+            if (mapperWorkerThreads > 1) {
+                m.accept("Shared symbol/format cache disabled in parallel mode to avoid cross-transaction stale IDs.");
+            }
 
             // Streaming SAX ingestion that is namespace/case safe.
             // We extract each <Item> subtree as XML and map it to DB.
@@ -512,7 +528,7 @@ public class EsxMmlMapperService {
                     if (isDefinitionItemKind(itemKind)) {
                         processDefinitionItem(itemEl, itemKind, articleId, articleName, statementItemId, libIdToItem, pendingRelations, symbolCache, formatCache, insertStats);
                     }
-                    if (isRegistrationItemKind(itemKind)) {
+                    if (isRegistrationItemKind(itemKind) || isDefinitionContainerItemKind(itemKind)) {
                         processRegistrationItem(
                                 itemEl,
                                 articleId,
@@ -891,6 +907,10 @@ public class EsxMmlMapperService {
         return "cluster".equals(lowerKind) || lowerKind.contains("registration");
     }
 
+    private boolean isDefinitionContainerItemKind(String itemKind) {
+        return itemKind != null && "definition-item".equalsIgnoreCase(itemKind);
+    }
+
     private void processDefinitionItem(
             Element itemEl,
             String itemKind,
@@ -903,27 +923,34 @@ public class EsxMmlMapperService {
             Map<String, UUID> formatCache,
             FileInsertStats insertStats
     ) {
-        Element definitionEl = firstDirectChildByName(itemEl, itemKind);
-        if (definitionEl == null) return;
+        Element definitionRoot = firstDirectChildByName(itemEl, itemKind);
+        if (definitionRoot == null) return;
 
-        String constructorKind = constructorKindFromDefinitionName(itemKind);
-        String constructorLibId = extractDefinitionConstructorLibId(definitionEl, articleName);
-
-        if (constructorKind != null && constructorLibId != null && !constructorLibId.isBlank()) {
-            MappedMmlItem constructorItem = buildSpecializedItem(definitionEl, "constructor", constructorKind, constructorLibId, articleName);
-            UUID constructorItemId = upsertMmlItem(articleId, constructorItem, insertStats);
-            insertConstructor(constructorItemId, constructorKind, constructorItem.shortName, insertStats);
-            libIdToItem.put(constructorLibId, constructorItemId);
-
-            if (definitionEl.selectSingleNode("./Definiens") != null || definitionEl.selectSingleNode(".//Definiens") != null) {
-                pendingRelations.add(PendingRelation.constructorDefinition(statementItemId, constructorLibId));
-                pendingRelations.add(PendingRelation.constructorDefiniens(statementItemId, constructorLibId));
-            }
+        List<Element> concreteDefinitions = findConstructorDefinitionElements(definitionRoot);
+        if (concreteDefinitions.isEmpty()) {
+            concreteDefinitions = List.of(definitionRoot);
         }
 
-        List<Element> patternElements = findNotationPatternElements(definitionEl);
-        for (Element patternEl : patternElements) {
-            processNotationPattern(patternEl, articleId, articleName, constructorLibId, libIdToItem, pendingRelations, symbolCache, formatCache, insertStats);
+        for (Element definitionEl : concreteDefinitions) {
+            String constructorKind = constructorKindFromDefinitionName(definitionEl.getName());
+            String constructorLibId = extractDefinitionConstructorLibId(definitionEl, articleName);
+
+            if (constructorKind != null && constructorLibId != null && !constructorLibId.isBlank()) {
+                MappedMmlItem constructorItem = buildSpecializedItem(definitionEl, "constructor", constructorKind, constructorLibId, articleName);
+                UUID constructorItemId = upsertMmlItem(articleId, constructorItem, insertStats);
+                insertConstructor(constructorItemId, constructorKind, constructorItem.shortName, insertStats);
+                libIdToItem.put(constructorLibId, constructorItemId);
+
+                if (definitionEl.selectSingleNode("./Definiens") != null || definitionEl.selectSingleNode(".//Definiens") != null) {
+                    pendingRelations.add(PendingRelation.constructorDefinition(statementItemId, constructorLibId));
+                    pendingRelations.add(PendingRelation.constructorDefiniens(statementItemId, constructorLibId));
+                }
+            }
+
+            List<Element> patternElements = findNotationPatternElements(definitionEl);
+            for (Element patternEl : patternElements) {
+                processNotationPattern(patternEl, articleId, articleName, constructorLibId, libIdToItem, pendingRelations, symbolCache, formatCache, insertStats);
+            }
         }
     }
 
@@ -937,68 +964,83 @@ public class EsxMmlMapperService {
             Map<String, UUID> formatCache,
             FileInsertStats insertStats
     ) {
-        Element registrationEl = null;
-        if (isRegistrationElementName(itemEl.getName())) {
-            registrationEl = itemEl;
+        List<Element> registrationElements = findRegistrationElements(itemEl);
+        if (registrationElements.isEmpty()) {
+            return;
         }
 
-        if (registrationEl == null) {
-            Element clusterEl = firstDirectChildByName(itemEl, "Cluster");
-            Element searchRoot = (clusterEl == null) ? itemEl : clusterEl;
-            for (Iterator<?> it = searchRoot.elementIterator(); it.hasNext(); ) {
-                Object o = it.next();
-                if (!(o instanceof Element e)) continue;
-                if (isRegistrationElementName(e.getName())) {
-                    registrationEl = e;
-                    break;
-                }
+        for (Element registrationEl : registrationElements) {
+            String regKind = registrationKindFromElementName(registrationEl.getName());
+            String regLibId = buildRegistrationLibId(articleName, regKind, registrationEl.attributeValue("xmlid"));
+
+            MappedMmlItem regItem = buildSpecializedItem(registrationEl, "registration", regKind, regLibId, articleName);
+            UUID registrationItemId = upsertMmlItem(articleId, regItem, insertStats);
+            insertRegistration(registrationItemId, normalizeRegistrationKind(regKind), insertStats);
+            if (regItem.libId != null && !regItem.libId.isBlank()) {
+                libIdToItem.put(regItem.libId, registrationItemId);
+            }
+
+            // Persist registration subtree under registration item id so registration views can classify roots correctly.
+            mapAllItemNodes(
+                    registrationEl,
+                    registrationItemId,
+                    articleId,
+                    NODE_TYPE_REGISTRATIONS,
+                    pendingRelations,
+                    symbolCache,
+                    formatCache,
+                    insertStats
+            );
+
+            List<org.dom4j.Node> refNodes = registrationEl.selectNodes(".//*[@absoluteconstrMMLId]");
+            for (org.dom4j.Node n : refNodes) {
+                if (!(n instanceof Element refEl)) continue;
+                String constructorLibId = refEl.attributeValue("absoluteconstrMMLId");
+                if (constructorLibId == null || constructorLibId.isBlank()) continue;
+                String role = deriveRegistrationRole(refEl);
+                boolean isPositive = !isNegativeReference(refEl);
+                pendingRelations.add(PendingRelation.registrationRelation(registrationItemId, constructorLibId, role, isPositive));
             }
         }
+    }
 
-        if (registrationEl == null) {
-            List<org.dom4j.Node> descendants = itemEl.selectNodes(".//*");
-            for (org.dom4j.Node n : descendants) {
-                if (!(n instanceof Element e)) continue;
-                if (isRegistrationElementName(e.getName())) {
-                    registrationEl = e;
-                    break;
-                }
+    private List<Element> findConstructorDefinitionElements(Element root) {
+        if (root == null) {
+            return List.of();
+        }
+        List<Element> out = new ArrayList<>();
+        if (CONSTRUCTOR_DEFINITION_ELEMENT_NAMES.contains(root.getName())) {
+            out.add(root);
+        }
+        List<org.dom4j.Node> descendants = root.selectNodes(".//*");
+        for (org.dom4j.Node n : descendants) {
+            if (!(n instanceof Element e)) continue;
+            if (CONSTRUCTOR_DEFINITION_ELEMENT_NAMES.contains(e.getName())) {
+                out.add(e);
             }
         }
+        return out;
+    }
 
-        if (registrationEl == null) return;
-
-        String regKind = registrationKindFromElementName(registrationEl.getName());
-        String regLibId = buildRegistrationLibId(articleName, regKind, registrationEl.attributeValue("xmlid"));
-
-        MappedMmlItem regItem = buildSpecializedItem(registrationEl, "registration", regKind, regLibId, articleName);
-        UUID registrationItemId = upsertMmlItem(articleId, regItem, insertStats);
-        insertRegistration(registrationItemId, normalizeRegistrationKind(regKind), insertStats);
-        if (regItem.libId != null && !regItem.libId.isBlank()) {
-            libIdToItem.put(regItem.libId, registrationItemId);
+    private List<Element> findRegistrationElements(Element root) {
+        if (root == null) {
+            return List.of();
         }
 
-        // Persist registration subtree under registration item id so registration views can classify roots correctly.
-        mapAllItemNodes(
-                registrationEl,
-                registrationItemId,
-                articleId,
-                NODE_TYPE_REGISTRATIONS,
-                pendingRelations,
-                symbolCache,
-                formatCache,
-                insertStats
+        List<Element> out = new ArrayList<>();
+        if (isRegistrationElementName(root.getName())) {
+            out.add(root);
+        }
+
+        List<org.dom4j.Node> descendants = root.selectNodes(
+                ".//Conditional-Registration | .//Existential-Registration | .//Functorial-Registration"
         );
-
-        List<org.dom4j.Node> refNodes = registrationEl.selectNodes(".//*[@absoluteconstrMMLId]");
-        for (org.dom4j.Node n : refNodes) {
-            if (!(n instanceof Element refEl)) continue;
-            String constructorLibId = refEl.attributeValue("absoluteconstrMMLId");
-            if (constructorLibId == null || constructorLibId.isBlank()) continue;
-            String role = deriveRegistrationRole(refEl);
-            boolean isPositive = !isNegativeReference(refEl);
-            pendingRelations.add(PendingRelation.registrationRelation(registrationItemId, constructorLibId, role, isPositive));
+        for (org.dom4j.Node n : descendants) {
+            if (n instanceof Element e) {
+                out.add(e);
+            }
         }
+        return out;
     }
 
     private MappedMmlItem buildSpecializedItem(Element sourceEl, String kind, String subKind, String libId, String articleName) {
@@ -1454,6 +1496,9 @@ public class EsxMmlMapperService {
 
     private UUID insertSymbolIfAbsentCached(UUID articleId, String text, Map<String, UUID> symbolCache, FileInsertStats stats) {
         if (articleId == null || text == null || text.isBlank()) return null;
+        if (symbolCache == null) {
+            return insertSymbolIfAbsent(articleId, text, stats);
+        }
         String key = articleId + "|" + text.trim();
         return symbolCache.computeIfAbsent(key, ignored -> insertSymbolIfAbsent(articleId, text, stats));
     }
@@ -1476,6 +1521,9 @@ public class EsxMmlMapperService {
 
     private UUID upsertFormatCached(UUID articleId, String name, String representation, Map<String, UUID> formatCache, FileInsertStats stats) {
         if (articleId == null || name == null || name.isBlank()) return null;
+        if (formatCache == null) {
+            return upsertFormat(articleId, name, representation, stats);
+        }
         String key = articleId + "|" + name.trim();
         return formatCache.computeIfAbsent(key, ignored -> upsertFormat(articleId, name, representation, stats));
     }

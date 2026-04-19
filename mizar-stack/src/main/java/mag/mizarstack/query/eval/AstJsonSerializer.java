@@ -19,6 +19,20 @@ public class AstJsonSerializer {
             return visitListQuery((ListQueryNode) query);
         } else if (query instanceof ConstructorQueryNode) {
             return visitConstructorQuery((ConstructorQueryNode) query);
+        } else if (query instanceof ArticleQueryNode) {
+            return visitArticleQuery((ArticleQueryNode) query);
+        } else if (query instanceof GroupQueryNode) {
+            return visitGroupQuery((GroupQueryNode) query);
+        } else if (query instanceof CompoundQueryNode) {
+            return visitCompoundQuery((CompoundQueryNode) query);
+        } else if (query instanceof ContextQueryNode) {
+            return visitContextQuery((ContextQueryNode) query);
+        } else if (query instanceof OperationQueryNode) {
+            return visitOperationQuery((OperationQueryNode) query);
+        } else if (query instanceof SelectiveQueryNode) {
+            return visitSelectiveQuery((SelectiveQueryNode) query);
+        } else if (query instanceof EnumeratedListNode) {
+            return visitEnumeratedList((EnumeratedListNode) query);
         }
         return root;
     }
@@ -27,6 +41,16 @@ public class AstJsonSerializer {
         ObjectNode root = JsonNodeFactory.instance.objectNode();
         if (node instanceof BasicOperationNode) {
             return visitBasicOperation((BasicOperationNode) node);
+        } else if (node instanceof FilterOperationNode) {
+            return visitFilterOperation((FilterOperationNode) node);
+        } else if (node instanceof GrepOperationNode) {
+            return visitGrepOperation((GrepOperationNode) node);
+        } else if (node instanceof ReverseOperationNode) {
+            return visitReverseOperation((ReverseOperationNode) node);
+        } else if (node instanceof CardinalityFilterOperationNode) {
+            return visitCardinalityOperation((CardinalityFilterOperationNode) node);
+        } else if (node instanceof CompoundOperationNode) {
+            return visitCompoundOperation((CompoundOperationNode) node);
         }
         return root;
     }
@@ -35,6 +59,9 @@ public class AstJsonSerializer {
         ObjectNode obj = JsonNodeFactory.instance.objectNode();
         obj.put("type", "ListQuery");
         obj.put("listType", node.getListType().toString());
+        if (node.getSource() != null) {
+            obj.set("source", serializeQuerySource(node.getSource()));
+        }
         return obj;
     }
 
@@ -96,6 +123,7 @@ public class AstJsonSerializer {
     private ObjectNode visitEnumeratedList(EnumeratedListNode node) {
         ObjectNode obj = JsonNodeFactory.instance.objectNode();
         obj.put("type", "EnumeratedList");
+        obj.put("size", node.getItems() == null ? 0 : node.getItems().size());
         return obj;
     }
 
@@ -136,6 +164,15 @@ public class AstJsonSerializer {
         obj.put("combinator", node.getCombinator().toString());
         obj.set("left", serializeOperation(node.getLeft()));
         obj.set("right", serializeOperation(node.getRight()));
+        return obj;
+    }
+
+    private ObjectNode visitCardinalityOperation(CardinalityFilterOperationNode node) {
+        ObjectNode obj = JsonNodeFactory.instance.objectNode();
+        obj.put("type", "CardinalityFilterOperation");
+        obj.put("comparator", node.getComparator().toString());
+        obj.put("operation", node.getOperationType().toString());
+        obj.put("threshold", node.getThreshold());
         return obj;
     }
 

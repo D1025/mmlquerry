@@ -8,8 +8,13 @@ plugins {
 group = 'com.example'
 version = '0.1.0'
 
+def targetJavaVersion = providers.gradleProperty("targetJavaVersion")
+        .map { Integer.parseInt(it) }
+        .orElse(17)
+        .get()
+
 java {
-    toolchain { languageVersion = JavaLanguageVersion.of(25) }
+    toolchain { languageVersion = JavaLanguageVersion.of(targetJavaVersion) }
 }
 
 repositories {
@@ -60,6 +65,9 @@ tasks.generateGrammarSource {
 
 sourceSets {
     main {
+        antlr {
+            srcDirs = ["src/main/antlr4"]
+        }
         java {
             srcDir "${buildDir}/generated-src/antlr/main"
         }

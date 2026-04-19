@@ -6,6 +6,7 @@ package mag.mizarstack.query.ast;
 public enum CompoundOperator {
     AND,
     OR,
+    BUTNOT,
     NOT
 }
 

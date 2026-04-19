@@ -1,151 +1,289 @@
 package mag.mizarstack.query.parser;
 
+import mag.mizarstack.query.MmlQueryBaseVisitor;
+import mag.mizarstack.query.MmlQueryParser;
 import mag.mizarstack.query.ast.*;
+import org.antlr.v4.runtime.Token;
+import java.util.Locale;
 
-/**
- * AST Builder for constructing query AST from parser context.
- * This is a placeholder for ANTLR visitor implementation.
- */
-public class AstBuilder {
+public class AstBuilder extends MmlQueryBaseVisitor<Object> {
 
-    public QueryNode buildQuery(Object queryContext) {
-        // TODO: Implement when ANTLR grammar is ready
-        return new QueryNode() {};
+    public QueryNode buildQuery(MmlQueryParser.QueryContext queryContext) {
+        return (QueryNode) visit(queryContext.expression());
     }
 
-    private QueryNode buildList(Object listContext) {
-        // TODO: Implement
-        return new QueryNode() {};
+    @Override
+    public Object visitExpression(MmlQueryParser.ExpressionContext ctx) {
+        return visit(ctx.orExpression());
     }
 
-    private QueryNode buildGlobalList(Object globalListContext) {
-        // TODO: Implement
-        return new QueryNode() {};
+    @Override
+    public Object visitOrExpression(MmlQueryParser.OrExpressionContext ctx) {
+        QueryNode current = (QueryNode) visit(ctx.andExpression(0));
+        for (int i = 1; i < ctx.andExpression().size(); i++) {
+            QueryNode right = (QueryNode) visit(ctx.andExpression(i));
+            Token opToken = ctx.getChild(2 * i - 1).getPayload() instanceof Token t ? t : null;
+            String opText = (opToken == null) ? ctx.getChild(2 * i - 1).getText() : opToken.getText();
+            CompoundOperator operator = "butnot".equalsIgnoreCase(opText)
+                    ? CompoundOperator.BUTNOT
+                    : CompoundOperator.OR;
+            current = new CompoundQueryNode(current, operator, right);
+        }
+        return current;
     }
 
-    private ListType parseListItemKind(Object listItemKindContext) {
-        // TODO: Implement
-        return ListType.ALL;
+    @Override
+    public Object visitAndExpression(MmlQueryParser.AndExpressionContext ctx) {
+        QueryNode current = (QueryNode) visit(ctx.unaryExpression(0));
+        for (int i = 1; i < ctx.unaryExpression().size(); i++) {
+            QueryNode right = (QueryNode) visit(ctx.unaryExpression(i));
+            current = new CompoundQueryNode(current, CompoundOperator.AND, right);
+        }
+        return current;
     }
 
-    private ListType parseItemKind(Object itemKindContext) {
-        // TODO: Implement
-        return ListType.ALL;
+    @Override
+    public Object visitUnaryExpression(MmlQueryParser.UnaryExpressionContext ctx) {
+        if (ctx.NOT() != null) {
+            QueryNode inner = (QueryNode) visit(ctx.unaryExpression());
+            return new GroupQueryNode(GroupQuantifier.NONE, inner);
+        }
+        return visit(ctx.pipelineExpression());
     }
 
-    private QuerySource buildListSource(Object listSourceContext) {
-        // TODO: Implement
-        return new QuerySource();
+    @Override
+    public Object visitPipelineExpression(MmlQueryParser.PipelineExpressionContext ctx) {
+        QueryNode current = (QueryNode) visit(ctx.atomExpression());
+        for (MmlQueryParser.OperationExpressionContext opCtx : ctx.operationExpression()) {
+            OperationNode operation = (OperationNode) visit(opCtx);
+            current = new OperationQueryNode(current, operation);
+        }
+        return current;
     }
 
-    private QueryNode buildQualifiedList(Object qualifiedListContext) {
-        // TODO: Implement
-        return new QueryNode() {};
+    @Override
+    public Object visitAtomExpression(MmlQueryParser.AtomExpressionContext ctx) {
+        if (ctx.expression() != null) {
+            return visit(ctx.expression());
+        }
+        if (ctx.theoremInfixExpression() != null) {
+            return visit(ctx.theoremInfixExpression());
+        }
+        if (ctx.listExpression() != null) {
+            return visit(ctx.listExpression());
+        }
+        if (ctx.constructorExpression() != null) {
+            return visit(ctx.constructorExpression());
+        }
+        if (ctx.articleExpression() != null) {
+            return visit(ctx.articleExpression());
+        }
+        throw new IllegalArgumentException("Unsupported atom expression: " + ctx.getText());
     }
 
-    private QueryNode buildArticleList(Object articleListContext) {
-        // TODO: Implement
-        return new QueryNode() {};
+    @Override
+    public Object visitTheoremInfixExpression(MmlQueryParser.TheoremInfixExpressionContext ctx) {
+        QuerySource source = new QuerySource(ctx.listSource() == null ? "*" : ctx.listSource().getText());
+        QueryNode base = new ListQueryNode(ListType.THEOREMS, source);
+
+        if (ctx.propositionInfixPredicate().size() != 2) {
+            throw new IllegalArgumentException("Theorem infix query expects exactly two proposition predicates.");
+        }
+
+        String firstPattern = extractAbsolutePattern(ctx.propositionInfixPredicate(0));
+        String secondPattern = extractAbsolutePattern(ctx.propositionInfixPredicate(1));
+
+        if (firstPattern == null || firstPattern.isBlank()) {
+            throw new IllegalArgumentException("First proposition predicate must include absolutepatternmmlid.");
+        }
+
+        String criterion = "PROP_INFIX|first=" + firstPattern + "|second=" + (secondPattern == null ? "*" : secondPattern);
+        return new SelectiveQueryNode(base, criterion);
     }
 
-    private QueryNode buildSymbolList(Object symbolListContext) {
-        // TODO: Implement
-        return new QueryNode() {};
+    @Override
+    public Object visitListExpression(MmlQueryParser.ListExpressionContext ctx) {
+        ListType listType = parseListType(ctx.listType().getText());
+        QuerySource source = new QuerySource(ctx.listSource() == null ? "*" : ctx.listSource().getText());
+        return new ListQueryNode(listType, source);
     }
 
-    private QueryNode buildFormatList(Object formatListContext) {
-        // TODO: Implement
-        return new QueryNode() {};
+    @Override
+    public Object visitConstructorExpression(MmlQueryParser.ConstructorExpressionContext ctx) {
+        return new ConstructorQueryNode(
+                ctx.ARTICLE_NAME().getText(),
+                ctx.itemKind().getText().toLowerCase(Locale.ROOT),
+                Integer.parseInt(ctx.NUMBER().getText())
+        );
     }
 
-    private QueryNode buildKeywordList(Object keywordListContext) {
-        // TODO: Implement
-        return new QueryNode() {};
+    @Override
+    public Object visitArticleExpression(MmlQueryParser.ArticleExpressionContext ctx) {
+        return new ArticleQueryNode(ctx.ARTICLE_NAME().getText());
     }
 
-    private QueryNode buildNonQualifiedList(Object nonQualifiedListContext) {
-        // TODO: Implement
-        return new QueryNode() {};
+    @Override
+    public Object visitOpRef(MmlQueryParser.OpRefContext ctx) {
+        return new BasicOperationNode(BasicOperationType.REF, null);
     }
 
-    private QueryNode buildEnumeratedList(Object enumeratedListContext) {
-        // TODO: Implement
-        return new QueryNode() {};
+    @Override
+    public Object visitOpOccur(MmlQueryParser.OpOccurContext ctx) {
+        return new BasicOperationNode(BasicOperationType.OCCUR, null);
     }
 
-    private QueryNode buildItemQuery(Object itemQueryContext) {
-        // TODO: Implement
-        return new QueryNode() {};
+    @Override
+    public Object visitOpDefinition(MmlQueryParser.OpDefinitionContext ctx) {
+        return new BasicOperationNode(BasicOperationType.DEFINITION, null);
     }
 
-    private QueryNode buildConstructor(Object constructorContext) {
-        // TODO: Implement
-        return new QueryNode() {};
+    @Override
+    public Object visitOpNotation(MmlQueryParser.OpNotationContext ctx) {
+        return new BasicOperationNode(BasicOperationType.NOTATION, null);
     }
 
-    private QueryNode buildConstructorAbbreviation(Object constructorAbbreviationContext) {
-        // TODO: Implement
-        return new QueryNode() {};
+    @Override
+    public Object visitOpRedef(MmlQueryParser.OpRedefContext ctx) {
+        return new BasicOperationNode(BasicOperationType.REDEF, null);
     }
 
-    private QueryNode buildConstructorRelatives(Object constructorRelativesContext) {
-        // TODO: Implement
-        return new QueryNode() {};
+    @Override
+    public Object visitOpOrigin(MmlQueryParser.OpOriginContext ctx) {
+        return new BasicOperationNode(BasicOperationType.ORIGIN, null);
     }
 
-    private QueryNode buildArticleQuery(Object articleQueryContext) {
-        // TODO: Implement
-        return new QueryNode() {};
+    @Override
+    public Object visitOpCopy(MmlQueryParser.OpCopyContext ctx) {
+        return new BasicOperationNode(BasicOperationType.COPY, null);
     }
 
-    private QueryNode buildGroupQuery(Object groupQueryContext) {
-        // TODO: Implement
-        return new QueryNode() {};
+    @Override
+    public Object visitOpTermTypeRef(MmlQueryParser.OpTermTypeRefContext ctx) {
+        return new BasicOperationNode(BasicOperationType.TERMTYPE_REF, null);
     }
 
-    private ConstructorItem parseConstructorItem(Object constructorItemContext) {
-        // TODO: Implement
-        return new ConstructorItem();
+    @Override
+    public Object visitOpDefTypeRef(MmlQueryParser.OpDefTypeRefContext ctx) {
+        return new BasicOperationNode(BasicOperationType.DEFTYPE_REF, null);
     }
 
-    private QueryNode buildCompoundQuery(Object compoundQueryContext) {
-        // TODO: Implement
-        return new QueryNode() {};
+    @Override
+    public Object visitOpMainMode(MmlQueryParser.OpMainModeContext ctx) {
+        return new BasicOperationNode(BasicOperationType.MAIN_MODE, null);
     }
 
-    private QueryNode buildContextQuery(Object contextQueryContext) {
-        // TODO: Implement
-        return new QueryNode() {};
+    @Override
+    public Object visitOpMainFunctor(MmlQueryParser.OpMainFunctorContext ctx) {
+        return new BasicOperationNode(BasicOperationType.MAIN_FUNCTOR, null);
     }
 
-    private QueryNode buildOperationQuery(Object operationQueryContext) {
-        // TODO: Implement
-        return new QueryNode() {};
+    @Override
+    public Object visitOpFilter(MmlQueryParser.OpFilterContext ctx) {
+        return new FilterOperationNode(parseStringLiteral(ctx.stringLiteral().getText()));
     }
 
-    private QueryNode buildSelectiveQuery(Object selectiveQueryContext) {
-        // TODO: Implement
-        return new QueryNode() {};
+    @Override
+    public Object visitOpGrep(MmlQueryParser.OpGrepContext ctx) {
+        return new GrepOperationNode(parseStringLiteral(ctx.stringLiteral().getText()));
     }
 
-    private OperationNode buildOperation(Object operationContext) {
-        // TODO: Implement
-        return new BasicOperationNode();
+    @Override
+    public Object visitOpReverse(MmlQueryParser.OpReverseContext ctx) {
+        return new ReverseOperationNode(ReverseOperationType.REVERSE);
     }
 
-    private OperationNode buildFilterOperation(Object filterOperationContext) {
-        // TODO: Implement
-        return new BasicOperationNode();
+    @Override
+    public Object visitOpInvert(MmlQueryParser.OpInvertContext ctx) {
+        return new ReverseOperationNode(ReverseOperationType.INVERT);
     }
 
-    private OperationNode buildGrepOperation(Object grepOperationContext) {
-        // TODO: Implement
-        return new BasicOperationNode();
+    @Override
+    public Object visitOpCardinality(MmlQueryParser.OpCardinalityContext ctx) {
+        return visit(ctx.cardinalityOperation());
     }
 
-    private OperationNode buildBasicOperation(Object basicOperationContext) {
-        // TODO: Implement
-        return new BasicOperationNode();
+    @Override
+    public Object visitOpWhereEq(MmlQueryParser.OpWhereEqContext ctx) {
+        return buildCardinalityOperation(ctx.operationName(), ctx.NUMBER().getText(), CardinalityComparator.EQ);
+    }
+
+    @Override
+    public Object visitOpWhereGe(MmlQueryParser.OpWhereGeContext ctx) {
+        return buildCardinalityOperation(ctx.operationName(), ctx.NUMBER().getText(), CardinalityComparator.GE);
+    }
+
+    @Override
+    public Object visitOpWhereLe(MmlQueryParser.OpWhereLeContext ctx) {
+        return buildCardinalityOperation(ctx.operationName(), ctx.NUMBER().getText(), CardinalityComparator.LE);
+    }
+
+    @Override
+    public Object visitOpWhereGt(MmlQueryParser.OpWhereGtContext ctx) {
+        return buildCardinalityOperation(ctx.operationName(), ctx.NUMBER().getText(), CardinalityComparator.GT);
+    }
+
+    @Override
+    public Object visitOpWhereLt(MmlQueryParser.OpWhereLtContext ctx) {
+        return buildCardinalityOperation(ctx.operationName(), ctx.NUMBER().getText(), CardinalityComparator.LT);
+    }
+
+    private CardinalityFilterOperationNode buildCardinalityOperation(
+            MmlQueryParser.OperationNameContext operationNameContext,
+            String thresholdRaw,
+            CardinalityComparator comparator
+    ) {
+        BasicOperationType operationType = parseOperationName(operationNameContext.getText());
+        int threshold = Integer.parseInt(thresholdRaw);
+        return new CardinalityFilterOperationNode(comparator, operationType, threshold);
+    }
+
+    private ListType parseListType(String text) {
+        String normalized = text.toLowerCase(Locale.ROOT);
+        return switch (normalized) {
+            case "constructor", "constructors" -> ListType.CONSTRUCTORS;
+            case "theorem", "theorems" -> ListType.THEOREMS;
+            case "definition", "definitions" -> ListType.DEFINITIONS;
+            case "statement", "statements" -> ListType.STATEMENTS;
+            case "registration", "registrations" -> ListType.REGISTRATIONS;
+            case "all" -> ListType.ALL;
+            default -> throw new IllegalArgumentException("Unsupported list type: " + text);
+        };
+    }
+
+    private BasicOperationType parseOperationName(String text) {
+        String normalized = text.toLowerCase(Locale.ROOT).replaceAll("\\s+", "");
+        return switch (normalized) {
+            case "ref" -> BasicOperationType.REF;
+            case "occur", "occurs" -> BasicOperationType.OCCUR;
+            case "definition", "definitions" -> BasicOperationType.DEFINITION;
+            case "notation" -> BasicOperationType.NOTATION;
+            case "termtyperef" -> BasicOperationType.TERMTYPE_REF;
+            case "deftyperef" -> BasicOperationType.DEFTYPE_REF;
+            default -> throw new IllegalArgumentException("Unsupported operation in where* filter: " + text);
+        };
+    }
+
+    private String extractAbsolutePattern(MmlQueryParser.PropositionInfixPredicateContext predicateContext) {
+        if (predicateContext.stringLiteral() == null) {
+            return null;
+        }
+        String raw = parseStringLiteral(predicateContext.stringLiteral().getText());
+        return raw == null ? null : raw.toUpperCase(Locale.ROOT);
+    }
+
+    private String parseStringLiteral(String text) {
+        if (text == null || text.length() < 2) {
+            return text;
+        }
+        char first = text.charAt(0);
+        char last = text.charAt(text.length() - 1);
+        if ((first == '\'' && last == '\'') || (first == '"' && last == '"')) {
+            String body = text.substring(1, text.length() - 1);
+            return body
+                    .replace("\\\"", "\"")
+                    .replace("\\'", "'")
+                    .replace("\\\\", "\\");
+        }
+        return text;
     }
 }
-

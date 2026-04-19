@@ -13,6 +13,16 @@ import java.util.Map;
 @RestControllerAdvice
 public class ApiExceptionHandler {
 
+    @ExceptionHandler(IllegalArgumentException.class)
+    public ResponseEntity<Map<String, Object>> handleBadRequest(IllegalArgumentException ex) {
+        Map<String, Object> body = Map.of(
+                "timestamp", Instant.now().toString(),
+                "error", "BAD_REQUEST",
+                "message", ex.getMessage() == null ? "Invalid request." : ex.getMessage()
+        );
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(body);
+    }
+
     @ExceptionHandler(Exception.class)
     public ResponseEntity<Map<String, Object>> handleAny(Exception ex) {
         log.error("Unhandled exception", ex);

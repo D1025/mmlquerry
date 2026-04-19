@@ -1,1 +1,5 @@
 .env
+.gradle-user
+.gradle-user/
+.idea
+.idea/

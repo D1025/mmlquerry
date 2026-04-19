@@ -59,7 +59,9 @@ final class EsxMmlSqlQueries {
 
     static final String INSERT_FORMAT_SYMBOL = """
             insert into format_symbol(format_id, symbol_id, pos)
-            values (:formatId, :symbolId, :pos)
+            select :formatId, :symbolId, :pos
+            where exists (select 1 from format f where f.id = :formatId)
+              and exists (select 1 from symbol s where s.id = :symbolId)
             on conflict (format_id, pos) do update
             set symbol_id = excluded.symbol_id
             """;
@@ -136,7 +138,9 @@ final class EsxMmlSqlQueries {
 
     static final String INSERT_NOTATION_SYMBOL = """
             insert into notation_symbol(notation_item_id, symbol_id, pos)
-            values (:notationItemId, :symbolId, :pos)
+            select :notationItemId, :symbolId, :pos
+            where exists (select 1 from notation n where n.item_id = :notationItemId)
+              and exists (select 1 from symbol s where s.id = :symbolId)
             on conflict (notation_item_id, pos) do update
             set symbol_id = excluded.symbol_id
             """;
