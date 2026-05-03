@@ -18,7 +18,7 @@ public class QueryWarmupService {
 
     private static final List<String> DEFAULT_WARMUP_QUERIES = List.of(
             "list of theorem in ABCMIZ_0",
-            "list of theorem where proposition has infix-term[absolutepatternmmlid='RELAT_1:3'] and proposition has infix-term"
+            "list of theorem where proposition has InfixTerm[absolutepatternmmlid='RELAT_1:3'] and proposition has InfixTerm"
     );
 
     private final QueryExecutionService queryExecutionService;

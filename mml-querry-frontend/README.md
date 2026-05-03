@@ -1,3 +1,11 @@
+# MML Query Frontend
+
+Dokladna dokumentacja jezyka zapytan jest tutaj:
+
+- [`docs/MML_QUERY_LANGUAGE.md`](../docs/MML_QUERY_LANGUAGE.md)
+
+Ponizej zostaje domyslna instrukcja Vite/React dla uruchamiania frontendu.
+
 # React + TypeScript + Vite
 
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.

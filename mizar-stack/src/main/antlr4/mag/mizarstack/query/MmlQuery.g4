@@ -34,11 +34,31 @@ atomExpression
     ;
 
 theoremInfixExpression
-    : LIST OF THEOREM (IN listSource)? WHERE propositionInfixPredicate AND propositionInfixPredicate
+    : LIST OF listType (IN listSource)? WHERE scopedPredicate (AND scopedPredicate)*
     ;
 
-propositionInfixPredicate
-    : PROPOSITION HAS INFIX_TERM (LBRACK ABSOLUTEPATTERNMMLID_ATTR EQ stringLiteral RBRACK)?
+scopedPredicate
+    : scopeName HAS nodeName (LBRACK attributeName EQ stringLiteral RBRACK)?
+    ;
+
+scopeName
+    : PROPOSITION
+    | ITEM
+    ;
+
+nodeName
+    : NODE_NAME
+    | ARTICLE_NAME
+    | ITEM
+    | PROPOSITION
+    | stringLiteral
+    ;
+
+attributeName
+    : NODE_NAME
+    | ARTICLE_NAME
+    | OCCUR
+    | stringLiteral
     ;
 
 listExpression
@@ -127,9 +147,8 @@ IN: I N;
 WHERE: W H E R E;
 ARTICLE: A R T I C L E;
 PROPOSITION: P R O P O S I T I O N;
+ITEM: I T E M;
 HAS: H A S;
-INFIX_TERM: I N F I X '-' T E R M;
-ABSOLUTEPATTERNMMLID_ATTR: A B S O L U T E P A T T E R N M M L I D;
 AND: A N D;
 OR: O R;
 BUTNOT: B U T N O T;
@@ -184,6 +203,7 @@ DFS: D F S;
 SCH: S C H;
 
 ARTICLE_NAME: [A-Z] [A-Z0-9_]*;
+NODE_NAME: [a-zA-Z] [a-zA-Z0-9_]* ('-' [a-zA-Z0-9_]+)*;
 NUMBER: [0-9]+;
 STRING
     : '\'' (~['\\] | '\\' .)* '\''

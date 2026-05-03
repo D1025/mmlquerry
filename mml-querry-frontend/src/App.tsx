@@ -1,4 +1,13 @@
-import { Fragment, useEffect, useMemo, useState } from 'react'
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type KeyboardEvent,
+} from 'react'
 import KeyboardArrowDownRoundedIcon from '@mui/icons-material/KeyboardArrowDownRounded'
 import KeyboardArrowUpRoundedIcon from '@mui/icons-material/KeyboardArrowUpRounded'
 import PlayArrowRoundedIcon from '@mui/icons-material/PlayArrowRounded'
@@ -16,6 +25,9 @@ import {
   Grid,
   IconButton,
   LinearProgress,
+  List,
+  ListItemButton,
+  Paper,
   Stack,
   Tab,
   Table,
@@ -32,6 +44,11 @@ import {
 } from '@mui/material'
 import { useAppDispatch, useAppSelector } from './app/hooks'
 import { fetchItemFragment, type QueryItem } from './features/query/queryApi'
+import {
+  applySuggestionAtCursor,
+  getQuerySuggestions,
+  validateQueryText,
+} from './features/query/queryAssist'
 import { fetchSyntax, runQuery, setQueryText } from './features/query/querySlice'
 
 type SortDirection = 'asc' | 'desc'
@@ -55,6 +72,16 @@ const TABLE_COLUMNS: ColumnDef[] = [
   { key: 'raw', label: 'raw' },
 ]
 
+const SUGGESTION_LIST_ID = 'query-suggestion-list'
+const SUGGESTION_OPTION_ID_PREFIX = 'query-suggestion-option'
+const SUGGESTION_MENU_WIDTH = 280
+const WORD_CHAR_REGEX = /[A-Za-z0-9_-]/
+
+interface SuggestionPosition {
+  top: number
+  left: number
+}
+
 function compareValues(left: unknown, right: unknown): number {
   const leftNumber = Number(left)
   const rightNumber = Number(right)
@@ -70,6 +97,91 @@ function buildRowKey(item: QueryItem, index: number): string {
   return `${item.item_id ?? ''}|${index}`
 }
 
+function getWordStartAtCursor(query: string, cursor: number): number {
+  const safeCursor = Math.max(0, Math.min(cursor, query.length))
+  let start = safeCursor
+
+  while (start > 0 && WORD_CHAR_REGEX.test(query.charAt(start - 1))) {
+    start -= 1
+  }
+
+  return start
+}
+
+function copyTextInputStyles(source: HTMLElement, target: HTMLElement) {
+  const style = window.getComputedStyle(source)
+  const properties = [
+    'boxSizing',
+    'width',
+    'height',
+    'paddingTop',
+    'paddingRight',
+    'paddingBottom',
+    'paddingLeft',
+    'borderTopWidth',
+    'borderRightWidth',
+    'borderBottomWidth',
+    'borderLeftWidth',
+    'fontFamily',
+    'fontSize',
+    'fontStyle',
+    'fontVariant',
+    'fontWeight',
+    'letterSpacing',
+    'lineHeight',
+    'tabSize',
+    'textAlign',
+    'textIndent',
+    'textTransform',
+    'whiteSpace',
+    'wordBreak',
+    'wordSpacing',
+  ]
+
+  for (const property of properties) {
+    target.style.setProperty(property, style.getPropertyValue(property))
+  }
+
+  target.style.overflowWrap = 'break-word'
+}
+
+function getSuggestionPosition(
+  input: HTMLTextAreaElement | HTMLInputElement,
+  query: string,
+  cursor: number,
+): SuggestionPosition {
+  const wordStart = getWordStartAtCursor(query, cursor)
+  const inputRect = input.getBoundingClientRect()
+  const mirror = document.createElement('div')
+  const marker = document.createElement('span')
+
+  copyTextInputStyles(input, mirror)
+  mirror.style.position = 'fixed'
+  mirror.style.top = `${inputRect.top}px`
+  mirror.style.left = `${inputRect.left}px`
+  mirror.style.visibility = 'hidden'
+  mirror.style.pointerEvents = 'none'
+  mirror.style.overflow = 'hidden'
+  mirror.style.zIndex = '-1'
+
+  marker.textContent = '\u200b'
+  mirror.textContent = input.value.slice(0, wordStart)
+  mirror.appendChild(marker)
+  document.body.appendChild(mirror)
+
+  const markerRect = marker.getBoundingClientRect()
+  document.body.removeChild(mirror)
+
+  const rawLeft = markerRect.left - input.scrollLeft
+  const rawTop = markerRect.bottom - input.scrollTop + 4
+  const maxLeft = Math.max(8, window.innerWidth - SUGGESTION_MENU_WIDTH - 8)
+
+  return {
+    left: Math.min(Math.max(8, rawLeft), maxLeft),
+    top: Math.min(Math.max(8, rawTop), window.innerHeight - 48),
+  }
+}
+
 function App() {
   const dispatch = useAppDispatch()
 
@@ -83,6 +195,12 @@ function App() {
   const [expandedRawByRowKey, setExpandedRawByRowKey] = useState<Record<string, string>>({})
   const [expandedRawLoadingByRowKey, setExpandedRawLoadingByRowKey] = useState<Record<string, boolean>>({})
   const [expandedRawErrorByRowKey, setExpandedRawErrorByRowKey] = useState<Record<string, string>>({})
+  const [queryCursor, setQueryCursor] = useState(0)
+  const [queryFocused, setQueryFocused] = useState(false)
+  const [selectedSuggestionIndex, setSelectedSuggestionIndex] = useState(0)
+  const [suggestionPosition, setSuggestionPosition] = useState<SuggestionPosition | null>(null)
+
+  const queryInputRef = useRef<HTMLTextAreaElement | HTMLInputElement | null>(null)
 
   const {
     queryText,
@@ -99,14 +217,6 @@ function App() {
       void dispatch(fetchSyntax())
     }
   }, [dispatch, syntaxStatus])
-
-  useEffect(() => {
-    setPage(0)
-    setExpandedRows({})
-    setExpandedRawByRowKey({})
-    setExpandedRawLoadingByRowKey({})
-    setExpandedRawErrorByRowKey({})
-  }, [filterText, rowsPerPage, result])
 
   const filteredSortedRows = useMemo<RowEntry[]>(() => {
     if (!result?.items.length) {
@@ -143,13 +253,125 @@ function App() {
     return filteredSortedRows.slice(start, start + rowsPerPage)
   }, [filteredSortedRows, page, rowsPerPage])
 
+  const querySuggestions = useMemo(
+    () => getQuerySuggestions(queryText, queryCursor, syntax),
+    [queryCursor, queryText, syntax],
+  )
+
+  const queryValidation = useMemo(() => validateQueryText(queryText, syntax), [queryText, syntax])
+
   const canExecute = queryText.trim().length > 0 && executeStatus !== 'loading'
+  const activeSuggestionIndex =
+    querySuggestions.length === 0
+      ? 0
+      : Math.min(selectedSuggestionIndex, querySuggestions.length - 1)
+  const activeSuggestionId = `${SUGGESTION_OPTION_ID_PREFIX}-${activeSuggestionIndex}`
+  const isSuggestionListOpen = queryFocused && querySuggestions.length > 0 && Boolean(suggestionPosition)
+
+  const updateSuggestionPosition = useCallback(() => {
+    const input = queryInputRef.current
+    if (!queryFocused || !input || querySuggestions.length === 0) {
+      setSuggestionPosition(null)
+      return
+    }
+
+    setSuggestionPosition(getSuggestionPosition(input, queryText, queryCursor))
+  }, [queryCursor, queryFocused, querySuggestions.length, queryText])
+
+  useEffect(() => {
+    updateSuggestionPosition()
+  }, [updateSuggestionPosition])
+
+  useEffect(() => {
+    if (!queryFocused) {
+      return undefined
+    }
+
+    window.addEventListener('resize', updateSuggestionPosition)
+    window.addEventListener('scroll', updateSuggestionPosition, true)
+
+    return () => {
+      window.removeEventListener('resize', updateSuggestionPosition)
+      window.removeEventListener('scroll', updateSuggestionPosition, true)
+    }
+  }, [queryFocused, updateSuggestionPosition])
+
+  const handleQueryCursorUpdate = (event: { target: EventTarget | null }) => {
+    const target = event.target as HTMLTextAreaElement | HTMLInputElement | null
+    if (!target) {
+      return
+    }
+    setQueryCursor(target.selectionStart ?? target.value.length)
+    setSelectedSuggestionIndex(0)
+  }
+
+  const handleQueryTextChange = (event: ChangeEvent<HTMLTextAreaElement | HTMLInputElement>) => {
+    const nextValue = event.target.value
+    const nextCursor = event.target.selectionStart ?? nextValue.length
+    dispatch(setQueryText(nextValue))
+    setQueryCursor(nextCursor)
+    setSelectedSuggestionIndex(0)
+  }
+
+  const acceptSuggestion = (suggestion: string) => {
+    const { query, nextCursor } = applySuggestionAtCursor(queryText, queryCursor, suggestion)
+    dispatch(setQueryText(query))
+    setQueryCursor(nextCursor)
+    setSelectedSuggestionIndex(0)
+    requestAnimationFrame(() => {
+      const input = queryInputRef.current
+      if (!input) return
+      input.focus()
+      input.setSelectionRange(nextCursor, nextCursor)
+    })
+  }
+
+  const handleQueryKeyDown = (event: KeyboardEvent<HTMLTextAreaElement | HTMLInputElement>) => {
+    if (querySuggestions.length === 0) {
+      return
+    }
+
+    if (event.key === 'ArrowDown') {
+      event.preventDefault()
+      setSelectedSuggestionIndex((current) => (current + 1) % querySuggestions.length)
+      return
+    }
+
+    if (event.key === 'ArrowUp') {
+      event.preventDefault()
+      setSelectedSuggestionIndex((current) =>
+        current === 0 ? querySuggestions.length - 1 : current - 1,
+      )
+      return
+    }
+
+    if (event.key === 'Tab' && !event.shiftKey) {
+      event.preventDefault()
+      acceptSuggestion(querySuggestions[activeSuggestionIndex] ?? querySuggestions[0])
+    }
+  }
+
+  const handleQueryKeyUp = (event: KeyboardEvent<HTMLTextAreaElement | HTMLInputElement>) => {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      return
+    }
+    handleQueryCursorUpdate(event)
+  }
+
+  const resetResultViewState = () => {
+    setPage(0)
+    setExpandedRows({})
+    setExpandedRawByRowKey({})
+    setExpandedRawLoadingByRowKey({})
+    setExpandedRawErrorByRowKey({})
+  }
 
   const handleRunQuery = () => {
     const normalizedQuery = queryText.trim()
     if (!normalizedQuery) {
       return
     }
+    resetResultViewState()
     void dispatch(runQuery(normalizedQuery))
   }
 
@@ -216,15 +438,88 @@ function App() {
               <CardContent>
                 <Stack spacing={2.5}>
                   <Typography variant="h6">Query editor</Typography>
-                  <TextField
-                    label="MML Query"
-                    value={queryText}
-                    onChange={(event) => dispatch(setQueryText(event.target.value))}
-                    fullWidth
-                    multiline
-                    minRows={5}
-                    placeholder="Np. list of theorem in ABCMIZ_0"
-                  />
+                  <Box>
+                    <TextField
+                      label="MML Query"
+                      value={queryText}
+                      onChange={handleQueryTextChange}
+                      onFocus={(event) => {
+                        setQueryFocused(true)
+                        handleQueryCursorUpdate(event)
+                      }}
+                      onBlur={() => setQueryFocused(false)}
+                      inputRef={queryInputRef}
+                      slotProps={{
+                        htmlInput: {
+                          'aria-activedescendant': isSuggestionListOpen ? activeSuggestionId : undefined,
+                          'aria-autocomplete': 'list',
+                          'aria-controls': isSuggestionListOpen ? SUGGESTION_LIST_ID : undefined,
+                          'aria-expanded': isSuggestionListOpen,
+                          onClick: handleQueryCursorUpdate,
+                          onKeyDown: handleQueryKeyDown,
+                          onKeyUp: handleQueryKeyUp,
+                          onScroll: updateSuggestionPosition,
+                          onSelect: handleQueryCursorUpdate,
+                        },
+                      }}
+                      fullWidth
+                      multiline
+                      minRows={5}
+                      placeholder="Np. list of definition where item has Redefine[occurs='true'] and item has AttributePattern[spelling='Noetherian']"
+                    />
+                    {isSuggestionListOpen && suggestionPosition && (
+                      <Paper
+                        id={SUGGESTION_LIST_ID}
+                        elevation={8}
+                        role="listbox"
+                        sx={{
+                          position: 'fixed',
+                          top: suggestionPosition.top,
+                          left: suggestionPosition.left,
+                          zIndex: (theme) => theme.zIndex.tooltip,
+                          width: SUGGESTION_MENU_WIDTH,
+                          maxHeight: 240,
+                          overflowY: 'auto',
+                          border: 1,
+                          borderColor: 'divider',
+                          borderRadius: 1,
+                        }}
+                      >
+                        <List dense disablePadding>
+                          {querySuggestions.map((suggestion, index) => (
+                            <ListItemButton
+                              id={`${SUGGESTION_OPTION_ID_PREFIX}-${index}`}
+                              key={suggestion}
+                              role="option"
+                              selected={index === activeSuggestionIndex}
+                              onMouseDown={(event) => event.preventDefault()}
+                              onMouseEnter={() => setSelectedSuggestionIndex(index)}
+                              onClick={() => acceptSuggestion(suggestion)}
+                              sx={{ py: 0.5 }}
+                            >
+                              <Typography
+                                component="span"
+                                noWrap
+                                sx={{ display: 'block', fontFamily: 'monospace', fontSize: 14 }}
+                              >
+                                {suggestion}
+                              </Typography>
+                            </ListItemButton>
+                          ))}
+                        </List>
+                      </Paper>
+                    )}
+                  </Box>
+                  {queryValidation.errors.map((message) => (
+                    <Alert key={`query-error-${message}`} severity="error">
+                      {message}
+                    </Alert>
+                  ))}
+                  {queryValidation.warnings.map((message) => (
+                    <Alert key={`query-warning-${message}`} severity="warning">
+                      {message}
+                    </Alert>
+                  ))}
                   <Stack
                     direction={{ xs: 'column', sm: 'row' }}
                     spacing={1.5}
@@ -346,7 +641,10 @@ function App() {
                             label="Filtruj wyniki"
                             size="small"
                             value={filterText}
-                            onChange={(event) => setFilterText(event.target.value)}
+                            onChange={(event) => {
+                              setFilterText(event.target.value)
+                              resetResultViewState()
+                            }}
                             placeholder="Szukaj we wszystkich kolumnach"
                           />
 
@@ -479,7 +777,7 @@ function App() {
                             rowsPerPage={rowsPerPage}
                             onRowsPerPageChange={(event) => {
                               setRowsPerPage(Number(event.target.value))
-                              setPage(0)
+                              resetResultViewState()
                             }}
                             rowsPerPageOptions={[10, 25, 50]}
                           />

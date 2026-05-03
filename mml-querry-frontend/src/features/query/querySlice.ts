@@ -17,7 +17,8 @@ interface QueryState {
 }
 
 const initialState: QueryState = {
-  queryText: 'list of theorem in ABCMIZ_0',
+  queryText:
+    "list of definition where item has Redefine[occurs='true'] and item has AttributePattern[spelling='Noetherian']",
   syntax: null,
   result: null,
   syntaxStatus: 'idle',

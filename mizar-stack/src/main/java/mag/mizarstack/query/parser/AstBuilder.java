@@ -4,6 +4,11 @@ import mag.mizarstack.query.MmlQueryBaseVisitor;
 import mag.mizarstack.query.MmlQueryParser;
 import mag.mizarstack.query.ast.*;
 import org.antlr.v4.runtime.Token;
+
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.List;
 import java.util.Locale;
 
 public class AstBuilder extends MmlQueryBaseVisitor<Object> {
@@ -83,21 +88,20 @@ public class AstBuilder extends MmlQueryBaseVisitor<Object> {
 
     @Override
     public Object visitTheoremInfixExpression(MmlQueryParser.TheoremInfixExpressionContext ctx) {
+        ListType listType = parseListType(ctx.listType().getText());
         QuerySource source = new QuerySource(ctx.listSource() == null ? "*" : ctx.listSource().getText());
-        QueryNode base = new ListQueryNode(ListType.THEOREMS, source);
+        QueryNode base = new ListQueryNode(listType, source);
 
-        if (ctx.propositionInfixPredicate().size() != 2) {
-            throw new IllegalArgumentException("Theorem infix query expects exactly two proposition predicates.");
+        if (ctx.scopedPredicate().isEmpty()) {
+            throw new IllegalArgumentException("List query with where requires at least one scoped predicate.");
         }
 
-        String firstPattern = extractAbsolutePattern(ctx.propositionInfixPredicate(0));
-        String secondPattern = extractAbsolutePattern(ctx.propositionInfixPredicate(1));
-
-        if (firstPattern == null || firstPattern.isBlank()) {
-            throw new IllegalArgumentException("First proposition predicate must include absolutepatternmmlid.");
+        List<ScopedPredicate> predicates = new ArrayList<>();
+        for (MmlQueryParser.ScopedPredicateContext predicateContext : ctx.scopedPredicate()) {
+            predicates.add(extractScopedPredicate(predicateContext));
         }
 
-        String criterion = "PROP_INFIX|first=" + firstPattern + "|second=" + (secondPattern == null ? "*" : secondPattern);
+        String criterion = buildScopedCriterion(predicates);
         return new SelectiveQueryNode(base, criterion);
     }
 
@@ -263,12 +267,107 @@ public class AstBuilder extends MmlQueryBaseVisitor<Object> {
         };
     }
 
-    private String extractAbsolutePattern(MmlQueryParser.PropositionInfixPredicateContext predicateContext) {
-        if (predicateContext.stringLiteral() == null) {
-            return null;
+    private ScopedPredicate extractScopedPredicate(MmlQueryParser.ScopedPredicateContext predicateContext) {
+        String scope = normalizeScopeName(predicateContext.scopeName().getText());
+        if (scope.isBlank()) {
+            throw new IllegalArgumentException("Scope in predicate cannot be blank.");
         }
-        String raw = parseStringLiteral(predicateContext.stringLiteral().getText());
-        return raw == null ? null : raw.toUpperCase(Locale.ROOT);
+
+        String nodeName = normalizeNodeName(readIdentifierText(predicateContext.nodeName().getText()));
+        if (nodeName.isBlank()) {
+            throw new IllegalArgumentException("Node name in scoped predicate cannot be blank.");
+        }
+
+        if (predicateContext.stringLiteral() == null) {
+            return new ScopedPredicate(scope, nodeName, null, null);
+        }
+
+        String attributeName = normalizeAttributeName(readIdentifierText(predicateContext.attributeName().getText()));
+        if (attributeName.isBlank()) {
+            throw new IllegalArgumentException("Attribute name in scoped predicate cannot be blank.");
+        }
+        String attributeValue = parseStringLiteral(predicateContext.stringLiteral().getText());
+        return new ScopedPredicate(scope, nodeName, attributeName, attributeValue);
+    }
+
+    private String buildScopedCriterion(List<ScopedPredicate> predicates) {
+        if (predicates == null || predicates.isEmpty()) {
+            throw new IllegalArgumentException("At least one scoped predicate is required.");
+        }
+
+        String scope = predicates.get(0).scope();
+        for (ScopedPredicate predicate : predicates) {
+            if (!scope.equals(predicate.scope())) {
+                throw new IllegalArgumentException("All predicates in a single where clause must use the same scope.");
+            }
+        }
+
+        StringBuilder sb = new StringBuilder("NODE_HAS|scope=").append(scope).append("|count=").append(predicates.size());
+        for (int i = 0; i < predicates.size(); i++) {
+            ScopedPredicate predicate = predicates.get(i);
+            sb.append("|n").append(i).append('=').append(encodeCriterionValue(predicate.nodeName()));
+            if (predicate.attributeName() != null && !predicate.attributeName().isBlank()) {
+                sb.append("|a").append(i).append('=').append(encodeCriterionValue(predicate.attributeName()));
+                sb.append("|v").append(i).append('=').append(encodeCriterionValue(
+                        predicate.attributeValue() == null ? "" : predicate.attributeValue()
+                ));
+            }
+        }
+        return sb.toString();
+    }
+
+    private String normalizeNodeName(String raw) {
+        if (raw == null) {
+            return "";
+        }
+        String normalized = raw.trim();
+        if (normalized.isEmpty()) {
+            return "";
+        }
+
+        normalized = normalized.replace('_', '-');
+        if (!normalized.contains("-")) {
+            normalized = normalized
+                    .replaceAll("([A-Z]+)([A-Z][a-z])", "$1-$2")
+                    .replaceAll("([a-z0-9])([A-Z])", "$1-$2");
+        }
+        return normalized.toLowerCase(Locale.ROOT);
+    }
+
+    private String normalizeAttributeName(String raw) {
+        if (raw == null) {
+            return "";
+        }
+        return raw.trim().toLowerCase(Locale.ROOT);
+    }
+
+    private String normalizeScopeName(String raw) {
+        if (raw == null) {
+            return "";
+        }
+        return raw.trim().toLowerCase(Locale.ROOT);
+    }
+
+    private String encodeCriterionValue(String raw) {
+        String value = raw == null ? "" : raw;
+        return Base64.getUrlEncoder()
+                .withoutPadding()
+                .encodeToString(value.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private String readIdentifierText(String rawText) {
+        if (rawText == null) {
+            return "";
+        }
+        String trimmed = rawText.trim();
+        if (trimmed.length() >= 2) {
+            char first = trimmed.charAt(0);
+            char last = trimmed.charAt(trimmed.length() - 1);
+            if ((first == '\'' && last == '\'') || (first == '"' && last == '"')) {
+                return parseStringLiteral(trimmed);
+            }
+        }
+        return trimmed;
     }
 
     private String parseStringLiteral(String text) {
@@ -285,5 +384,8 @@ public class AstBuilder extends MmlQueryBaseVisitor<Object> {
                     .replace("\\\\", "\\");
         }
         return text;
+    }
+
+    private record ScopedPredicate(String scope, String nodeName, String attributeName, String attributeValue) {
     }
 }

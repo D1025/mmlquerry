@@ -12,13 +12,60 @@ class QueryParserTest {
     @Test
     void parsesTheoremInfixPredicateQuery() {
         QueryNode node = parser.parseQuery(
-                "list of theorem where proposition has infix-term[absolutepatternmmlid='RELAT_1:3'] and proposition has infix-term"
+                "list of theorem where proposition has InfixTerm[absolutepatternmmlid='RELAT_1:3'] and proposition has InfixTerm"
         );
 
         assertInstanceOf(SelectiveQueryNode.class, node);
         SelectiveQueryNode selective = (SelectiveQueryNode) node;
         assertInstanceOf(ListQueryNode.class, selective.getQuery());
-        assertTrue(selective.getCriterion().startsWith("PROP_INFIX|first=RELAT_1:3|second=*"));
+        assertTrue(selective.getCriterion().startsWith("NODE_HAS|scope=proposition|count=2|"));
+    }
+
+    @Test
+    void parsesTheoremPredicateWithAnyNodeAndSpelling() {
+        QueryNode node = parser.parseQuery(
+                "list of theorem where proposition has InfixTerm[spelling='Element']"
+        );
+
+        assertInstanceOf(SelectiveQueryNode.class, node);
+        SelectiveQueryNode selective = (SelectiveQueryNode) node;
+        assertInstanceOf(ListQueryNode.class, selective.getQuery());
+        assertTrue(selective.getCriterion().startsWith("NODE_HAS|scope=proposition|count=1|"));
+    }
+
+    @Test
+    void parsesThesisNodePredicate() {
+        QueryNode node = parser.parseQuery(
+                "list of theorem where proposition has Thesis"
+        );
+
+        assertInstanceOf(SelectiveQueryNode.class, node);
+        SelectiveQueryNode selective = (SelectiveQueryNode) node;
+        assertInstanceOf(ListQueryNode.class, selective.getQuery());
+        assertTrue(selective.getCriterion().startsWith("NODE_HAS|scope=proposition|count=1|"));
+    }
+
+    @Test
+    void parsesQuotedNodeAndAttributeNames() {
+        QueryNode node = parser.parseQuery(
+                "list of theorem where proposition has \"Definition\"[\"spelling\"='Element']"
+        );
+
+        assertInstanceOf(SelectiveQueryNode.class, node);
+        SelectiveQueryNode selective = (SelectiveQueryNode) node;
+        assertTrue(selective.getCriterion().startsWith("NODE_HAS|scope=proposition|count=1|"));
+    }
+
+    @Test
+    void parsesDefinitionRedefineAndPatternSpellingQuery() {
+        QueryNode node = parser.parseQuery(
+                "list of definition where item has Redefine[occurs='true'] and item has AttributePattern[spelling='Noetherian']"
+        );
+
+        assertInstanceOf(SelectiveQueryNode.class, node);
+        SelectiveQueryNode selective = (SelectiveQueryNode) node;
+        assertInstanceOf(ListQueryNode.class, selective.getQuery());
+        assertTrue(selective.getCriterion().startsWith("NODE_HAS|scope=item|count=2|"));
     }
 
     @Test
@@ -40,4 +87,3 @@ class QueryParserTest {
         assertInstanceOf(CompoundQueryNode.class, node);
     }
 }
-

@@ -9,6 +9,7 @@ import mag.mizarstack.query.ast.*;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
 
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
@@ -307,6 +308,12 @@ public class QueryEvaluationService {
         if (criterion == null || criterion.isBlank()) {
             return base;
         }
+        if (criterion.startsWith("NODE_HAS|")) {
+            return applyNodeHasCriterion(base, criterion);
+        }
+        if (criterion.startsWith("PROP_HAS|")) {
+            return applyNodeHasCriterion(base, criterion);
+        }
         if (criterion.startsWith("PROP_INFIX|")) {
             return applyPropositionInfixCriterion(base, criterion);
         }
@@ -320,104 +327,133 @@ public class QueryEvaluationService {
         if (first == null || first.isBlank()) {
             throw new IllegalArgumentException("PROP_INFIX criterion requires first=<absolutepatternmmlid>");
         }
-        String firstPattern = first.toUpperCase(Locale.ROOT);
+        List<PropositionPredicate> predicates = new ArrayList<>();
+        predicates.add(new PropositionPredicate(
+                "infix-term",
+                "absolutepatternmmlid",
+                first
+        ));
+        if (second == null || second.isBlank() || "*".equals(second)) {
+            predicates.add(new PropositionPredicate("infix-term", null, null));
+        } else {
+            predicates.add(new PropositionPredicate("infix-term", "absolutepatternmmlid", second));
+        }
+        return applyNodePredicates(base, "proposition", predicates, true, "Filtered by proposition infix pattern");
+    }
+
+    private QueryResult applyNodeHasCriterion(QueryResult base, String criterion) {
+        Map<String, String> parts = parseCriterionParts(criterion);
+        String scope = normalizeScopeName(parts.get("scope"));
+        // Backward-compatibility for historical PROP_HAS criteria without explicit scope.
+        if (scope.isBlank()) {
+            scope = "proposition";
+        }
+        int predicateCount = parsePositiveInt(parts.get("count"), "NODE_HAS criterion requires count=<positive integer>");
+
+        List<PropositionPredicate> predicates = new ArrayList<>();
+        for (int i = 0; i < predicateCount; i++) {
+            String node = decodeCriterionPart(parts.get("n" + i));
+            if (node == null || node.isBlank()) {
+                throw new IllegalArgumentException("NODE_HAS criterion is missing node for predicate index " + i);
+            }
+            String attr = decodeCriterionPart(parts.get("a" + i));
+            String value = decodeCriterionPart(parts.get("v" + i));
+            if (attr == null || attr.isBlank()) {
+                attr = null;
+                value = null;
+            }
+            predicates.add(new PropositionPredicate(node, attr, value));
+        }
+
+        boolean requireDistinctNodes = "proposition".equals(scope);
+        return applyNodePredicates(base, scope, predicates, requireDistinctNodes, "Filtered by scoped predicates");
+    }
+
+    private QueryResult applyNodePredicates(
+            QueryResult base,
+            String scope,
+            List<PropositionPredicate> predicates,
+            boolean requireDistinctNodes,
+            String description
+    ) {
+        if (predicates == null || predicates.isEmpty()) {
+            return base;
+        }
+        if (!"proposition".equals(scope) && !"item".equals(scope)) {
+            throw new IllegalArgumentException("Unsupported scope for NODE_HAS criterion: " + scope);
+        }
 
         List<UUID> itemIds = extractItemIds(base.getData());
         if (itemIds.isEmpty()) {
-            return new QueryResult(List.of(), "No theorem items to filter by PROP_INFIX");
+            return new QueryResult(List.of(), "No items to filter by scoped predicates");
         }
 
-        boolean hasSecond = second != null && !second.isBlank() && !"*".equals(second);
-        String secondPattern = hasSecond ? second.toUpperCase(Locale.ROOT) : "";
-        String itemIdsCsv = toUuidCsv(itemIds);
+        StringBuilder sql = new StringBuilder("""
+                with base_items as (
+                    select cast(unnest(string_to_array(:itemIdsCsv, ',')) as uuid) as item_id
+                ),
+                scoped_nodes as (
+                    select
+                        n.id as node_id,
+                        n.item_id,
+                        substring(n.node_path from '^(.*/Proposition\\[[0-9]+\\])') as proposition_path,
+                        lower(coalesce(n.details ->> 'tag', '')) as tag_lower,
+                        n.details -> 'attrs' as attrs
+                    from item_node n
+                    join base_items bi on bi.item_id = n.item_id
+                )
+                select distinct n0.item_id
+                from scoped_nodes n0
+                where 1=1
+                """);
 
-        String sql = hasSecond ? """
-                with base_items as (
-                    select cast(unnest(string_to_array(:itemIdsCsv, ',')) as uuid) as item_id
-                ),
-                infix_nodes as (
-                    select
-                        n.id as node_id,
-                        n.item_id,
-                        substring(n.node_path from '^(.*/Proposition\\[[0-9]+\\])') as proposition_path,
-                        n.details -> 'attrs' ->> 'absolutepatternMMLId' as absolute_pattern_mml_id
-                    from item_node n
-                    join base_items bi on bi.item_id = n.item_id
-                    where n.details ->> 'tag' = 'Infix-Term'
-                      and n.node_path like '%/Proposition[%/Infix-Term[%'
-                )
-                select vt.item_id,
-                       vt.lib_id,
-                       vt.article_name,
-                       vt.kind,
-                       vt.subkind,
-                       vt.text_content,
-                       vt.node_type
-                from view_theorems vt
-                join base_items bi on bi.item_id = vt.item_id
-                where exists (
-                      select 1
-                      from infix_nodes p1
-                      where p1.item_id = vt.item_id
-                        and p1.absolute_pattern_mml_id = :firstPattern
-                        and exists (
-                            select 1
-                            from infix_nodes p2
-                            where p2.item_id = p1.item_id
-                              and p2.node_id <> p1.node_id
-                              and p2.proposition_path = p1.proposition_path
-                              and p2.absolute_pattern_mml_id = :secondPattern
-                        )
-                  )
-                """
-                : """
-                with base_items as (
-                    select cast(unnest(string_to_array(:itemIdsCsv, ',')) as uuid) as item_id
-                ),
-                infix_nodes as (
-                    select
-                        n.id as node_id,
-                        n.item_id,
-                        substring(n.node_path from '^(.*/Proposition\\[[0-9]+\\])') as proposition_path,
-                        n.details -> 'attrs' ->> 'absolutepatternMMLId' as absolute_pattern_mml_id
-                    from item_node n
-                    join base_items bi on bi.item_id = n.item_id
-                    where n.details ->> 'tag' = 'Infix-Term'
-                      and n.node_path like '%/Proposition[%/Infix-Term[%'
-                )
-                select vt.item_id,
-                       vt.lib_id,
-                       vt.article_name,
-                       vt.kind,
-                       vt.subkind,
-                       vt.text_content,
-                       vt.node_type
-                from view_theorems vt
-                join base_items bi on bi.item_id = vt.item_id
-                where exists (
-                      select 1
-                      from infix_nodes p1
-                      where p1.item_id = vt.item_id
-                        and p1.absolute_pattern_mml_id = :firstPattern
-                        and exists (
-                            select 1
-                            from infix_nodes p2
-                            where p2.item_id = p1.item_id
-                              and p2.node_id <> p1.node_id
-                              and p2.proposition_path = p1.proposition_path
-                        )
-                  )
-                """;
+        if ("proposition".equals(scope)) {
+            sql.append("\n  and n0.proposition_path is not null");
+        }
+
+        for (int i = 1; i < predicates.size(); i++) {
+            sql.append("\n  and exists (")
+                    .append("\n      select 1")
+                    .append("\n      from scoped_nodes n")
+                    .append(i)
+                    .append("\n      where n").append(i).append(".item_id = n0.item_id");
+            if ("proposition".equals(scope)) {
+                sql.append("\n        and n").append(i).append(".proposition_path = n0.proposition_path");
+            }
+            if (requireDistinctNodes) {
+                sql.append("\n        and n").append(i).append(".node_id <> n0.node_id");
+            }
+
+            appendNodePredicateCondition(sql, predicates.get(i), "n" + i, i);
+            sql.append("\n  )");
+        }
 
         Map<String, Object> params = new LinkedHashMap<>();
-        params.put("itemIdsCsv", itemIdsCsv);
-        params.put("firstPattern", firstPattern);
-        if (hasSecond) {
-            params.put("secondPattern", secondPattern);
-        }
-        List<Map<String, Object>> rows = queryRows(sql, params);
+        params.put("itemIdsCsv", toUuidCsv(itemIds));
 
-        return new QueryResult(deduplicate(rows), "Filtered by proposition infix pattern");
+        for (int i = 0; i < predicates.size(); i++) {
+            PropositionPredicate predicate = predicates.get(i);
+            params.put("node" + i, normalizeLookupValue(predicate.nodeName()));
+            if (predicate.attributeName() != null && !predicate.attributeName().isBlank()) {
+                params.put("attr" + i, normalizeLookupValue(predicate.attributeName()));
+                if (predicate.attributeValue() != null) {
+                    params.put("value" + i, normalizeLookupValue(predicate.attributeValue()));
+                }
+            }
+        }
+
+        appendNodePredicateCondition(sql, predicates.get(0), "n0", 0);
+
+        List<UUID> matchedIds = queryItemIds(sql.toString(), params);
+        Set<UUID> matched = new HashSet<>(matchedIds);
+        List<Map<String, Object>> rows = base.getData().stream()
+                .filter(row -> {
+                    UUID id = asUuid(row.get("item_id"));
+                    return id != null && matched.contains(id);
+                })
+                .toList();
+
+        return new QueryResult(deduplicate(rows), description);
     }
 
     private QueryResult negate(QueryResult input) {
@@ -570,6 +606,73 @@ public class QueryEvaluationService {
         return out;
     }
 
+    private void appendNodePredicateCondition(
+            StringBuilder sql,
+            PropositionPredicate predicate,
+            String alias,
+            int predicateIndex
+    ) {
+        sql.append("\n    and ").append(alias).append(".tag_lower = :node").append(predicateIndex);
+
+        if (predicate.attributeName() != null && !predicate.attributeName().isBlank()) {
+            sql.append("\n    and exists (")
+                    .append("\n        select 1")
+                    .append("\n        from jsonb_each_text(coalesce(").append(alias)
+                    .append(".attrs, '{}'::jsonb)) a").append(predicateIndex).append("(attr_key, attr_value)")
+                    .append("\n        where lower(a").append(predicateIndex).append(".attr_key) = :attr").append(predicateIndex);
+
+            if (predicate.attributeValue() != null) {
+                sql.append("\n          and lower(coalesce(a").append(predicateIndex)
+                        .append(".attr_value, '')) = :value").append(predicateIndex);
+            }
+            sql.append("\n    )");
+        }
+    }
+
+    private int parsePositiveInt(String raw, String messageOnFailure) {
+        if (raw == null || raw.isBlank()) {
+            throw new IllegalArgumentException(messageOnFailure);
+        }
+        try {
+            int value = Integer.parseInt(raw.trim());
+            if (value <= 0) {
+                throw new IllegalArgumentException(messageOnFailure);
+            }
+            return value;
+        } catch (NumberFormatException ex) {
+            throw new IllegalArgumentException(messageOnFailure);
+        }
+    }
+
+    private String decodeCriterionPart(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        if (raw.isBlank()) {
+            return "";
+        }
+        try {
+            byte[] decoded = Base64.getUrlDecoder().decode(raw);
+            return new String(decoded, StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException ex) {
+            return raw;
+        }
+    }
+
+    private String normalizeLookupValue(String raw) {
+        if (raw == null) {
+            return "";
+        }
+        return raw.trim().toLowerCase(Locale.ROOT);
+    }
+
+    private String normalizeScopeName(String raw) {
+        if (raw == null) {
+            return "";
+        }
+        return raw.trim().toLowerCase(Locale.ROOT);
+    }
+
     private String normalizeSource(QuerySource source) {
         if (source == null || source.getSource() == null || source.getSource().isBlank()) {
             return "*";
@@ -611,12 +714,30 @@ public class QueryEvaluationService {
         }).list();
     }
 
+    private List<UUID> queryItemIds(String sql, Map<String, Object> params) {
+        JdbcClient.StatementSpec spec = jdbcClient.sql(sql);
+        for (Map.Entry<String, Object> entry : params.entrySet()) {
+            spec = spec.param(entry.getKey(), entry.getValue());
+        }
+        List<UUID> rows = spec.query((rs, rowNum) -> asUuid(rs.getObject("item_id"))).list();
+        LinkedHashSet<UUID> unique = new LinkedHashSet<>();
+        for (UUID row : rows) {
+            if (row != null) {
+                unique.add(row);
+            }
+        }
+        return new ArrayList<>(unique);
+    }
+
     private Object safeGet(java.sql.ResultSet rs, String column) {
         try {
             return rs.getObject(column);
         } catch (Exception ignored) {
             return null;
         }
+    }
+
+    private record PropositionPredicate(String nodeName, String attributeName, String attributeValue) {
     }
 
     @Data

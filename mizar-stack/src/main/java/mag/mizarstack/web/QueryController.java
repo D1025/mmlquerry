@@ -5,11 +5,16 @@ import mag.mizarstack.query.eval.AstJsonSerializer;
 import mag.mizarstack.query.integration.QueryExecutionService;
 import mag.mizarstack.query.integration.QueryItemFragmentService;
 import mag.mizarstack.query.integration.QueryWarmupService;
+import mag.mizarstack.xml_names.ESXAttributeName;
+import mag.mizarstack.xml_names.ESXElementName;
 import org.springframework.web.bind.annotation.*;
 
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeSet;
 import java.util.UUID;
 
 @RestController
@@ -60,8 +65,11 @@ public class QueryController {
                         "list of theorem in ABCMIZ_0",
                         "ABCMIZ_0:func 1 | ref | occur",
                         "list of constructor and list of theorem in ABCMIZ_0",
-                        "list of theorem where proposition has infix-term[absolutepatternmmlid='RELAT_1:3'] and proposition has infix-term",
-                        "list of theorem where proposition has infix-term[absolutepatternmmlid='RELAT_1:3'] and proposition has infix-term[absolutepatternmmlid='XBOOLE_0:2']",
+                        "list of theorem where proposition has Thesis",
+                        "list of theorem where proposition has InfixTerm[spelling='Element']",
+                        "list of theorem where proposition has InfixTerm[absolutepatternmmlid='RELAT_1:3'] and proposition has InfixTerm",
+                        "list of theorem where proposition has InfixTerm[absolutepatternmmlid='RELAT_1:3'] and proposition has InfixTerm[absolutepatternmmlid='XBOOLE_0:2']",
+                        "list of definition where item has Redefine[occurs='true'] and item has AttributePattern[spelling='Noetherian']",
                         "list of constructor | wherege(ref,2)",
                         "list of theorem | grep('field')"
                 ),
@@ -73,7 +81,9 @@ public class QueryController {
                         "termtype ref", "deftype ref", "main mode", "main functor",
                         "filter('key=value' or 'text')", "grep('regex')", "reverse", "invert",
                         "whereeq(op,n)", "wherege(op,n)", "wherele(op,n)", "wheregt(op,n)", "wherelt(op,n)"
-                )
+                ),
+                "supportedNodeNames", readInterfaceStringConstants(ESXElementName.class),
+                "supportedAttributeNames", readInterfaceStringConstants(ESXAttributeName.class)
         );
     }
 
@@ -93,5 +103,27 @@ public class QueryController {
     }
 
     public record WarmupRequest(List<String> queries) {
+    }
+
+    private static List<String> readInterfaceStringConstants(Class<?> type) {
+        TreeSet<String> values = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+        for (Field field : type.getFields()) {
+            int modifiers = field.getModifiers();
+            if (!Modifier.isPublic(modifiers) || !Modifier.isStatic(modifiers) || !Modifier.isFinal(modifiers)) {
+                continue;
+            }
+            if (!String.class.equals(field.getType())) {
+                continue;
+            }
+            try {
+                Object raw = field.get(null);
+                if (raw instanceof String value && !value.isBlank()) {
+                    values.add(value);
+                }
+            } catch (IllegalAccessException ignored) {
+                // Interface constants should be accessible; ignore defensive fallback.
+            }
+        }
+        return List.copyOf(values);
     }
 }

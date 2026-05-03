@@ -2,6 +2,8 @@ export interface SyntaxResponse {
   examples: string[]
   supportedOperators: string[]
   supportedPipelineOperations: string[]
+  supportedNodeNames?: string[]
+  supportedAttributeNames?: string[]
 }
 
 export interface ExecuteQueryResponse {
