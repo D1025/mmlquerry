@@ -70,6 +70,9 @@ public class QueryController {
                         "list of theorem where proposition has InfixTerm[absolutepatternmmlid='RELAT_1:3'] and proposition has InfixTerm",
                         "list of theorem where proposition has InfixTerm[absolutepatternmmlid='RELAT_1:3'] and proposition has InfixTerm[absolutepatternmmlid='XBOOLE_0:2']",
                         "list of definition where item has Redefine[occurs='true'] and item has AttributePattern[spelling='Noetherian']",
+                        "list of definition | nodes Item[kind='Attribute-Definition'] where has Redefine[occurs='true'] and has AttributePattern[spelling='Noetherian']",
+                        "list of definition | nodes Item where has Redefine[occurs='true'] and has *[spelling='Noetherian']",
+                        "list of definition | nodes Item where redefine true and has *[spelling='Noetherian']",
                         "list of constructor | wherege(ref,2)",
                         "list of theorem | grep('field')"
                 ),
@@ -79,6 +82,8 @@ public class QueryController {
                 "supportedPipelineOperations", List.of(
                         "ref", "occur", "definition", "notation", "redef", "origin", "copy",
                         "termtype ref", "deftype ref", "main mode", "main functor",
+                        "nodes NodeName[attr='value'] where has Child[attr='value']",
+                        "nodes NodeName where redefine true|false|both",
                         "filter('key=value' or 'text')", "grep('regex')", "reverse", "invert",
                         "whereeq(op,n)", "wherege(op,n)", "wherele(op,n)", "wheregt(op,n)", "wherelt(op,n)"
                 ),

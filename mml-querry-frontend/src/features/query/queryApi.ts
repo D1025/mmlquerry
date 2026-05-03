@@ -12,10 +12,20 @@ export interface ExecuteQueryResponse {
   description: string
   count: number
   items: QueryItem[]
+  timing?: QueryTiming
+}
+
+export interface QueryTiming {
+  parseMs: number
+  executeMs: number
+  projectionMs: number
+  totalMs: number
 }
 
 export interface QueryItem {
   item_id: string
+  node_id?: string
+  node_path?: string
   lib_id: string
   article_name: string
   node_type: string

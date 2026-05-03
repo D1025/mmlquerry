@@ -51,6 +51,7 @@ nodeName
     | ARTICLE_NAME
     | ITEM
     | PROPOSITION
+    | STAR
     | stringLiteral
     ;
 
@@ -115,9 +116,27 @@ operationExpression
     | MAIN FUNCTOR                                # opMainFunctor
     | FILTER LPAREN stringLiteral RPAREN          # opFilter
     | GREP LPAREN stringLiteral RPAREN            # opGrep
+    | NODES nodeSelector (WHERE nodeWherePredicate (AND nodeWherePredicate)*)? # opNodes
     | REVERSE                                     # opReverse
     | INVERT                                      # opInvert
     | cardinalityOperation                        # opCardinality
+    ;
+
+nodeSelector
+    : nodeName (LBRACK attributeName EQ stringLiteral RBRACK)?
+    ;
+
+nodePredicate
+    : HAS nodeName (LBRACK attributeName EQ stringLiteral RBRACK)?
+    ;
+
+nodeWherePredicate
+    : nodePredicate
+    | redefinePredicate
+    ;
+
+redefinePredicate
+    : nodeName nodeName?
     ;
 
 cardinalityOperation
@@ -182,6 +201,7 @@ MAIN: M A I N;
 FUNCTOR: F U N C T O R;
 FILTER: F I L T E R;
 GREP: G R E P;
+NODES: N O D E S?;
 REVERSE: R E V E R S E;
 INVERT: I N V E R T;
 WHEREEQ: W H E R E E Q;

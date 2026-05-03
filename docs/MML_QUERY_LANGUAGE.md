@@ -126,6 +126,33 @@ Opis odpowiada aktualnej implementacji parsera ANTLR i evaluatora backendu.
 - Rola: odwrocenie kolejnosci rekordow.
 - Uwaga: aktualnie dziala tak samo jak `reverse`.
 
+## `nodes NodeName[...] where has ChildName[...]`
+
+- Rola: wyciagniecie z aktualnych itemow konkretnych wezlow XML zamiast zwracania calego itemu bazowego.
+- Semantyka: dla kazdego itemu wejsciowego znajduje potomne wezly o podanym tagu i opcjonalnym atrybucie, a nastepnie filtruje je po warunkach w ich poddrzewie.
+- Warunek po `where` ma postac `has NodeName` albo `has NodeName[attr='value']`.
+- `has *[attr='value']` dopasowuje dowolny tag z podanym atrybutem.
+- Skrot `redefined` albo `redefine` oznacza `has Redefine[occurs='true']`.
+- Skrot `redefine true|false|both` oznacza odpowiednio `has Redefine[occurs='true']`, `has Redefine[occurs='false']` albo `has Redefine` bez filtrowania po `occurs`.
+- Gdy pasuje kilka zagniezdzonych wezlow, zwracany jest najbardziej szczegolowy pasujacy wezel, zeby nie dublowac przodka i potomka.
+- Przyklad docelowego `Item` z definicja atrybutu:
+
+```text
+list of definition | nodes Item[kind='Attribute-Definition'] where has Redefine[occurs='true'] and has AttributePattern[spelling='Noetherian']
+```
+
+- Ten sam przypadek bez znajomosci `kind` docelowego itemu i bez znajomosci nazwy elementu z atrybutem `spelling`:
+
+```text
+list of definition | nodes Item where has Redefine[occurs='true'] and has *[spelling='Noetherian']
+```
+
+- To samo z krotszym filtrem `Redefine`:
+
+```text
+list of definition | nodes Item where redefine true and has *[spelling='Noetherian']
+```
+
 ## 4. Operatory kardynalnosci
 
 ## `whereeq(op,n)`

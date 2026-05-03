@@ -192,6 +192,16 @@ public class AstBuilder extends MmlQueryBaseVisitor<Object> {
     }
 
     @Override
+    public Object visitOpNodes(MmlQueryParser.OpNodesContext ctx) {
+        NodePredicate target = extractNodeSelector(ctx.nodeSelector());
+        List<NodePredicate> descendantPredicates = new ArrayList<>();
+        for (MmlQueryParser.NodeWherePredicateContext predicateContext : ctx.nodeWherePredicate()) {
+            descendantPredicates.add(extractNodeWherePredicate(predicateContext));
+        }
+        return new NodeSelectionOperationNode(target, descendantPredicates);
+    }
+
+    @Override
     public Object visitOpReverse(MmlQueryParser.OpReverseContext ctx) {
         return new ReverseOperationNode(ReverseOperationType.REVERSE);
     }
@@ -288,6 +298,77 @@ public class AstBuilder extends MmlQueryBaseVisitor<Object> {
         }
         String attributeValue = parseStringLiteral(predicateContext.stringLiteral().getText());
         return new ScopedPredicate(scope, nodeName, attributeName, attributeValue);
+    }
+
+    private NodePredicate extractNodeSelector(MmlQueryParser.NodeSelectorContext selectorContext) {
+        String nodeName = normalizeNodeName(readIdentifierText(selectorContext.nodeName().getText()));
+        if (nodeName.isBlank()) {
+            throw new IllegalArgumentException("Node selector cannot be blank.");
+        }
+
+        if (selectorContext.stringLiteral() == null) {
+            return new NodePredicate(nodeName, null, null);
+        }
+
+        String attributeName = normalizeAttributeName(readIdentifierText(selectorContext.attributeName().getText()));
+        if (attributeName.isBlank()) {
+            throw new IllegalArgumentException("Node selector attribute name cannot be blank.");
+        }
+        String attributeValue = parseStringLiteral(selectorContext.stringLiteral().getText());
+        return new NodePredicate(nodeName, attributeName, attributeValue);
+    }
+
+    private NodePredicate extractNodePredicate(MmlQueryParser.NodePredicateContext predicateContext) {
+        String nodeName = normalizeNodeName(readIdentifierText(predicateContext.nodeName().getText()));
+        if (nodeName.isBlank()) {
+            throw new IllegalArgumentException("Node predicate cannot be blank.");
+        }
+
+        if (predicateContext.stringLiteral() == null) {
+            return new NodePredicate(nodeName, null, null);
+        }
+
+        String attributeName = normalizeAttributeName(readIdentifierText(predicateContext.attributeName().getText()));
+        if (attributeName.isBlank()) {
+            throw new IllegalArgumentException("Node predicate attribute name cannot be blank.");
+        }
+        String attributeValue = parseStringLiteral(predicateContext.stringLiteral().getText());
+        return new NodePredicate(nodeName, attributeName, attributeValue);
+    }
+
+    private NodePredicate extractNodeWherePredicate(MmlQueryParser.NodeWherePredicateContext predicateContext) {
+        if (predicateContext.nodePredicate() != null) {
+            return extractNodePredicate(predicateContext.nodePredicate());
+        }
+        return extractRedefinePredicate(predicateContext.redefinePredicate());
+    }
+
+    private NodePredicate extractRedefinePredicate(MmlQueryParser.RedefinePredicateContext predicateContext) {
+        if (predicateContext == null || predicateContext.nodeName().isEmpty()) {
+            throw new IllegalArgumentException("Redefine predicate cannot be blank.");
+        }
+
+        String shorthand = normalizeAttributeName(readIdentifierText(predicateContext.nodeName(0).getText()));
+        if (!"redefine".equals(shorthand) && !"redefined".equals(shorthand)) {
+            throw new IllegalArgumentException(
+                    "Unsupported node predicate shorthand: " + predicateContext.nodeName(0).getText()
+            );
+        }
+
+        String state = "true";
+        if (predicateContext.nodeName().size() > 1) {
+            state = normalizeAttributeName(readIdentifierText(predicateContext.nodeName(1).getText()));
+        }
+
+        return switch (state) {
+            case "true" -> new NodePredicate("redefine", "occurs", "true");
+            case "false" -> new NodePredicate("redefine", "occurs", "false");
+            case "both" -> new NodePredicate("redefine", null, null);
+            default -> throw new IllegalArgumentException(
+                    "Unsupported redefine option: " + predicateContext.nodeName(1).getText()
+                            + ". Use true, false, or both."
+            );
+        };
     }
 
     private String buildScopedCriterion(List<ScopedPredicate> predicates) {

@@ -45,6 +45,8 @@ public class AstJsonSerializer {
             return visitFilterOperation((FilterOperationNode) node);
         } else if (node instanceof GrepOperationNode) {
             return visitGrepOperation((GrepOperationNode) node);
+        } else if (node instanceof NodeSelectionOperationNode) {
+            return visitNodeSelectionOperation((NodeSelectionOperationNode) node);
         } else if (node instanceof ReverseOperationNode) {
             return visitReverseOperation((ReverseOperationNode) node);
         } else if (node instanceof CardinalityFilterOperationNode) {
@@ -148,6 +150,35 @@ public class AstJsonSerializer {
         ObjectNode obj = JsonNodeFactory.instance.objectNode();
         obj.put("type", "GrepOperation");
         obj.put("pattern", node.getPattern());
+        return obj;
+    }
+
+    private ObjectNode visitNodeSelectionOperation(NodeSelectionOperationNode node) {
+        ObjectNode obj = JsonNodeFactory.instance.objectNode();
+        obj.put("type", "NodeSelectionOperation");
+        obj.set("target", serializeNodePredicate(node.getTarget()));
+        var predicates = JsonNodeFactory.instance.arrayNode();
+        if (node.getDescendantPredicates() != null) {
+            for (NodePredicate predicate : node.getDescendantPredicates()) {
+                predicates.add(serializeNodePredicate(predicate));
+            }
+        }
+        obj.set("descendantPredicates", predicates);
+        return obj;
+    }
+
+    private ObjectNode serializeNodePredicate(NodePredicate predicate) {
+        ObjectNode obj = JsonNodeFactory.instance.objectNode();
+        if (predicate == null) {
+            return obj;
+        }
+        obj.put("nodeName", predicate.getNodeName());
+        if (predicate.getAttributeName() != null) {
+            obj.put("attributeName", predicate.getAttributeName());
+        }
+        if (predicate.getAttributeValue() != null) {
+            obj.put("attributeValue", predicate.getAttributeValue());
+        }
         return obj;
     }
 

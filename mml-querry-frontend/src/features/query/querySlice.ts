@@ -18,7 +18,7 @@ interface QueryState {
 
 const initialState: QueryState = {
   queryText:
-    "list of definition where item has Redefine[occurs='true'] and item has AttributePattern[spelling='Noetherian']",
+    "list of definition | nodes Item where redefine true and has *[spelling='Noetherian']",
   syntax: null,
   result: null,
   syntaxStatus: 'idle',

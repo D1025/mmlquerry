@@ -19,6 +19,27 @@ import java.util.regex.PatternSyntaxException;
 @RequiredArgsConstructor
 public class QueryEvaluationService {
 
+    private static final Map<String, List<String>> ATTRIBUTE_KEY_CANDIDATES = Map.ofEntries(
+            Map.entry("absoluteconstrmmlid", List.of("absoluteconstrMMLId", "absoluteconstrmmlid")),
+            Map.entry("absolutenr", List.of("absolutenr")),
+            Map.entry("absoluteorigconstrmmlid", List.of("absoluteorigconstrMMLId", "absoluteorigconstrmmlid")),
+            Map.entry("absoluteorigpatternmmlid", List.of("absoluteorigpatternMMLId", "absoluteorigpatternmmlid")),
+            Map.entry("absolutepatternmmlid", List.of("absolutepatternMMLId", "absolutepatternmmlid")),
+            Map.entry("arity", List.of("arity")),
+            Map.entry("constr", List.of("constr")),
+            Map.entry("formatdes", List.of("formatdes")),
+            Map.entry("formatnr", List.of("formatnr")),
+            Map.entry("kind", List.of("kind")),
+            Map.entry("mmlid", List.of("MMLId", "mmlid")),
+            Map.entry("occurs", List.of("occurs")),
+            Map.entry("origconstrnr", List.of("origconstrnr")),
+            Map.entry("origpatternnr", List.of("origpatternnr")),
+            Map.entry("patternnr", List.of("patternnr")),
+            Map.entry("position", List.of("position")),
+            Map.entry("spelling", List.of("spelling")),
+            Map.entry("xmlid", List.of("xmlid"))
+    );
+
     private final JdbcClient jdbcClient;
     private final ExtendedQueryEvaluationService extendedEvaluationService;
 
@@ -241,6 +262,9 @@ public class QueryEvaluationService {
         if (operation instanceof GrepOperationNode node) {
             return applyGrep(base, node.getPattern());
         }
+        if (operation instanceof NodeSelectionOperationNode node) {
+            return applyNodeSelection(base, node);
+        }
         if (operation instanceof ReverseOperationNode node) {
             return applyReverse(base, node.getOperationType());
         }
@@ -295,6 +319,74 @@ public class QueryEvaluationService {
                         || compiled.matcher(safeToString(row.get("article_name"))).find())
                 .toList();
         return new QueryResult(filtered, "Grep applied");
+    }
+
+    private QueryResult applyNodeSelection(QueryResult base, NodeSelectionOperationNode operation) {
+        if (operation == null || operation.getTarget() == null) {
+            return base;
+        }
+
+        List<UUID> itemIds = extractItemIds(base.getData());
+        if (itemIds.isEmpty()) {
+            return new QueryResult(List.of(), "No input items for node selection");
+        }
+
+        NodePredicate target = operation.getTarget();
+        List<NodePredicate> descendantPredicates = operation.getDescendantPredicates() == null
+                ? List.of()
+                : operation.getDescendantPredicates();
+
+        StringBuilder sql = new StringBuilder("""
+                with base_items as (
+                    select cast(unnest(string_to_array(:itemIdsCsv, ',')) as uuid) as item_id
+                )
+                select distinct
+                       n0.id as node_id,
+                       n0.item_id,
+                       mi.lib_id,
+                       a.name as article_name,
+                       mi.kind,
+                       coalesce(n0.details -> 'attrs' ->> 'kind', mi.subkind) as subkind,
+                       n0.raw as raw_text,
+                       coalesce(n0.details -> 'attrs' ->> 'kind', lower(coalesce(n0.details ->> 'tag', ''))) as node_type,
+                       coalesce(n0.details -> 'attrs' ->> 'position', cast(n0.pos as text)) as text_position,
+                       n0.node_path,
+                       lower(coalesce(n0.details ->> 'tag', '')) as node_tag,
+                       n0.details -> 'attrs' ->> 'xmlid' as node_xmlid
+                from base_items bi
+                join item_node n0 on n0.item_id = bi.item_id
+                join mml_item mi on mi.id = n0.item_id
+                join article a on a.id = mi.article_id
+                where 1=1
+                """);
+
+        appendNodePredicateCondition(sql, target, "n0", 0);
+
+        for (int i = 0; i < descendantPredicates.size(); i++) {
+            int predicateIndex = i + 1;
+            sql.append("\n  and exists (")
+                    .append("\n      select 1")
+                    .append("\n      from item_node n").append(predicateIndex)
+                    .append("\n      where n").append(predicateIndex).append(".item_id = n0.item_id")
+                    .append("\n        and n").append(predicateIndex).append(".node_path like n0.node_path || '/%'");
+            appendNodePredicateCondition(sql, descendantPredicates.get(i), "n" + predicateIndex, predicateIndex);
+            sql.append("\n  )");
+        }
+
+        sql.append("\norder by article_name, text_position, n0.node_path");
+
+        Map<String, Object> params = new LinkedHashMap<>();
+        params.put("itemIdsCsv", toUuidCsv(itemIds));
+        putNodePredicateParams(params, target, 0);
+        for (int i = 0; i < descendantPredicates.size(); i++) {
+            putNodePredicateParams(params, descendantPredicates.get(i), i + 1);
+        }
+
+        List<Map<String, Object>> rows = queryRows(sql.toString(), params);
+        return new QueryResult(
+                deduplicate(removeAncestorNodeRows(rows)),
+                "Selected nodes: " + target.getNodeName()
+        );
     }
 
     private QueryResult applyReverse(QueryResult base, ReverseOperationType type) {
@@ -391,37 +483,30 @@ public class QueryEvaluationService {
         StringBuilder sql = new StringBuilder("""
                 with base_items as (
                     select cast(unnest(string_to_array(:itemIdsCsv, ',')) as uuid) as item_id
-                ),
-                scoped_nodes as (
-                    select
-                        n.id as node_id,
-                        n.item_id,
-                        substring(n.node_path from '^(.*/Proposition\\[[0-9]+\\])') as proposition_path,
-                        lower(coalesce(n.details ->> 'tag', '')) as tag_lower,
-                        n.details -> 'attrs' as attrs
-                    from item_node n
-                    join base_items bi on bi.item_id = n.item_id
                 )
                 select distinct n0.item_id
-                from scoped_nodes n0
+                from base_items bi
+                join item_node n0 on n0.item_id = bi.item_id
                 where 1=1
                 """);
 
         if ("proposition".equals(scope)) {
-            sql.append("\n  and n0.proposition_path is not null");
+            sql.append("\n  and substring(n0.node_path from '^(.*/Proposition\\[[0-9]+\\])') is not null");
         }
 
         for (int i = 1; i < predicates.size(); i++) {
             sql.append("\n  and exists (")
                     .append("\n      select 1")
-                    .append("\n      from scoped_nodes n")
+                    .append("\n      from item_node n")
                     .append(i)
                     .append("\n      where n").append(i).append(".item_id = n0.item_id");
             if ("proposition".equals(scope)) {
-                sql.append("\n        and n").append(i).append(".proposition_path = n0.proposition_path");
+                sql.append("\n        and substring(n").append(i)
+                        .append(".node_path from '^(.*/Proposition\\[[0-9]+\\])') = ")
+                        .append("substring(n0.node_path from '^(.*/Proposition\\[[0-9]+\\])')");
             }
             if (requireDistinctNodes) {
-                sql.append("\n        and n").append(i).append(".node_id <> n0.node_id");
+                sql.append("\n        and n").append(i).append(".id <> n0.id");
             }
 
             appendNodePredicateCondition(sql, predicates.get(i), "n" + i, i);
@@ -511,6 +596,15 @@ public class QueryEvaluationService {
     }
 
     private String rowKey(Map<String, Object> row) {
+        Object nodeXmlId = row.get("node_xmlid");
+        Object articleName = row.get("article_name");
+        if (nodeXmlId != null && articleName != null) {
+            return "xmlid:" + articleName + ":" + nodeXmlId;
+        }
+        Object nodeId = row.get("node_id");
+        if (nodeId != null) {
+            return "node:" + nodeId;
+        }
         UUID itemId = asUuid(row.get("item_id"));
         if (itemId != null) {
             return "item:" + itemId;
@@ -528,6 +622,42 @@ public class QueryEvaluationService {
             indexed.putIfAbsent(rowKey(row), row);
         }
         return new ArrayList<>(indexed.values());
+    }
+
+    private List<Map<String, Object>> removeAncestorNodeRows(List<Map<String, Object>> rows) {
+        if (rows == null || rows.size() < 2) {
+            return rows == null ? List.of() : rows;
+        }
+
+        Map<String, TreeSet<String>> pathsByItemId = new HashMap<>();
+        for (Map<String, Object> row : rows) {
+            String itemId = safeToString(row.get("item_id"));
+            String path = safeToString(row.get("node_path"));
+            if (itemId.isBlank() || path.isBlank()) {
+                continue;
+            }
+            pathsByItemId.computeIfAbsent(itemId, ignored -> new TreeSet<>()).add(path);
+        }
+
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (Map<String, Object> candidate : rows) {
+            String candidateItemId = safeToString(candidate.get("item_id"));
+            String candidatePath = safeToString(candidate.get("node_path"));
+            if (candidateItemId.isBlank() || candidatePath.isBlank()) {
+                out.add(candidate);
+                continue;
+            }
+
+            TreeSet<String> itemPaths = pathsByItemId.get(candidateItemId);
+            String descendantPrefix = candidatePath + "/";
+            String nearestDescendant = itemPaths == null ? null : itemPaths.ceiling(descendantPrefix);
+            boolean hasMatchingDescendant = nearestDescendant != null && nearestDescendant.startsWith(descendantPrefix);
+
+            if (!hasMatchingDescendant) {
+                out.add(candidate);
+            }
+        }
+        return out;
     }
 
     private List<UUID> extractItemIds(List<Map<String, Object>> rows) {
@@ -608,25 +738,123 @@ public class QueryEvaluationService {
 
     private void appendNodePredicateCondition(
             StringBuilder sql,
+            NodePredicate predicate,
+            String alias,
+            int predicateIndex
+    ) {
+        if (!isWildcardNode(predicate.getNodeName())) {
+            sql.append("\n    and lower(coalesce(").append(alias)
+                    .append(".details ->> 'tag', '')) = :node").append(predicateIndex);
+        }
+
+        if (predicate.getAttributeName() != null && !predicate.getAttributeName().isBlank()) {
+            appendNodeAttributeCondition(sql, predicate, alias, predicateIndex);
+        }
+    }
+
+    private void appendNodePredicateCondition(
+            StringBuilder sql,
             PropositionPredicate predicate,
             String alias,
             int predicateIndex
     ) {
-        sql.append("\n    and ").append(alias).append(".tag_lower = :node").append(predicateIndex);
+        appendNodePredicateCondition(
+                sql,
+                new NodePredicate(predicate.nodeName(), predicate.attributeName(), predicate.attributeValue()),
+                alias,
+                predicateIndex
+        );
+    }
 
-        if (predicate.attributeName() != null && !predicate.attributeName().isBlank()) {
-            sql.append("\n    and exists (")
-                    .append("\n        select 1")
-                    .append("\n        from jsonb_each_text(coalesce(").append(alias)
-                    .append(".attrs, '{}'::jsonb)) a").append(predicateIndex).append("(attr_key, attr_value)")
-                    .append("\n        where lower(a").append(predicateIndex).append(".attr_key) = :attr").append(predicateIndex);
-
-            if (predicate.attributeValue() != null) {
-                sql.append("\n          and lower(coalesce(a").append(predicateIndex)
-                        .append(".attr_value, '')) = :value").append(predicateIndex);
-            }
-            sql.append("\n    )");
+    private void putNodePredicateParams(Map<String, Object> params, NodePredicate predicate, int predicateIndex) {
+        if (!isWildcardNode(predicate.getNodeName())) {
+            params.put("node" + predicateIndex, normalizeLookupValue(predicate.getNodeName()));
         }
+        if (predicate.getAttributeName() != null && !predicate.getAttributeName().isBlank()) {
+            params.put("attr" + predicateIndex, normalizeLookupValue(predicate.getAttributeName()));
+            if (predicate.getAttributeValue() != null) {
+                params.put("value" + predicateIndex, normalizeLookupValue(predicate.getAttributeValue()));
+            }
+        }
+    }
+
+    private boolean isWildcardNode(String nodeName) {
+        return "*".equals(safeToString(nodeName).trim());
+    }
+
+    private void appendNodeAttributeCondition(
+            StringBuilder sql,
+            NodePredicate predicate,
+            String alias,
+            int predicateIndex
+    ) {
+        List<String> keyCandidates = attributeKeyCandidates(predicate.getAttributeName());
+        if (!keyCandidates.isEmpty()) {
+            appendKnownAttributeExists(sql, alias, keyCandidates);
+            if (predicate.getAttributeValue() == null) {
+                return;
+            }
+
+            sql.append("\n    and lower(coalesce(");
+            for (int i = 0; i < keyCandidates.size(); i++) {
+                if (i > 0) {
+                    sql.append(", ");
+                }
+                sql.append(alias)
+                        .append(".details -> 'attrs' ->> '")
+                        .append(escapeSqlLiteral(keyCandidates.get(i)))
+                        .append("'");
+            }
+            sql.append(", '')) = :value").append(predicateIndex);
+            return;
+        }
+
+        sql.append("\n    and exists (")
+                .append("\n        select 1")
+                .append("\n        from jsonb_each_text(coalesce(").append(alias)
+                .append(".details -> 'attrs', '{}'::jsonb)) a").append(predicateIndex)
+                .append("(attr_key, attr_value)")
+                .append("\n        where lower(a").append(predicateIndex)
+                .append(".attr_key) = :attr").append(predicateIndex);
+
+        if (predicate.getAttributeValue() != null) {
+            sql.append("\n          and lower(coalesce(a").append(predicateIndex)
+                    .append(".attr_value, '')) = :value").append(predicateIndex);
+        }
+        sql.append("\n    )");
+    }
+
+    private void appendKnownAttributeExists(StringBuilder sql, String alias, List<String> keyCandidates) {
+        sql.append("\n    and (");
+        for (int i = 0; i < keyCandidates.size(); i++) {
+            if (i > 0) {
+                sql.append(" or ");
+            }
+            sql.append("jsonb_exists(coalesce(").append(alias)
+                    .append(".details -> 'attrs', '{}'::jsonb), '")
+                    .append(escapeSqlLiteral(keyCandidates.get(i)))
+                    .append("')");
+        }
+        sql.append(")");
+    }
+
+    private List<String> attributeKeyCandidates(String attributeName) {
+        String normalized = normalizeLookupValue(attributeName);
+        if (normalized.isBlank()) {
+            return List.of();
+        }
+        List<String> known = ATTRIBUTE_KEY_CANDIDATES.get(normalized);
+        if (known != null) {
+            return known;
+        }
+        if (normalized.matches("[a-z0-9_-]+")) {
+            return List.of(normalized);
+        }
+        return List.of();
+    }
+
+    private String escapeSqlLiteral(String value) {
+        return safeToString(value).replace("'", "''");
     }
 
     private int parsePositiveInt(String raw, String messageOnFailure) {
@@ -710,6 +938,22 @@ public class QueryEvaluationService {
             row.put("text_content", rawText);
             row.put("node_type", safeGet(rs, "node_type"));
             row.put("text_position", safeGet(rs, "text_position"));
+            Object nodeId = safeGet(rs, "node_id");
+            if (nodeId != null) {
+                row.put("node_id", nodeId);
+            }
+            Object nodePath = safeGet(rs, "node_path");
+            if (nodePath != null) {
+                row.put("node_path", nodePath);
+            }
+            Object nodeTag = safeGet(rs, "node_tag");
+            if (nodeTag != null) {
+                row.put("node_tag", nodeTag);
+            }
+            Object nodeXmlId = safeGet(rs, "node_xmlid");
+            if (nodeXmlId != null) {
+                row.put("node_xmlid", nodeXmlId);
+            }
             return row;
         }).list();
     }

@@ -4,6 +4,7 @@ const START_KEYWORDS = ['list', 'article']
 const SCOPE_KEYWORDS = ['item', 'proposition']
 const CLAUSE_KEYWORDS = ['of', 'in', 'where', 'has', 'and', 'or', 'butnot', 'not']
 const LIST_TYPES = ['theorem', 'definition', 'statement', 'registration', 'constructor', 'all']
+const REDEFINE_KEYWORDS = ['redefine', 'redefined', 'true', 'false', 'both']
 const PIPELINE_KEYWORDS = [
   'ref',
   'occur',
@@ -19,6 +20,7 @@ const PIPELINE_KEYWORDS = [
   'functor',
   'filter',
   'grep',
+  'nodes',
   'reverse',
   'invert',
   'whereeq',
@@ -44,6 +46,7 @@ const VALID_KEYWORDS = new Set(
     ...SCOPE_KEYWORDS,
     ...CLAUSE_KEYWORDS,
     ...LIST_TYPES,
+    ...REDEFINE_KEYWORDS,
     ...PIPELINE_KEYWORDS,
     ...ATTRIBUTE_HINTS,
   ].map((token) => token.toLowerCase()),
@@ -105,6 +108,7 @@ function buildSuggestionDictionary(syntax: SyntaxResponse | null): string[] {
     ...START_KEYWORDS,
     ...CLAUSE_KEYWORDS,
     ...LIST_TYPES,
+    ...REDEFINE_KEYWORDS,
     ...SCOPE_KEYWORDS,
     ...PIPELINE_KEYWORDS,
     ...NODE_HINTS,

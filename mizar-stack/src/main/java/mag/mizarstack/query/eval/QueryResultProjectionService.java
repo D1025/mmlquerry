@@ -1,6 +1,9 @@
 package mag.mizarstack.query.eval;
 
 import lombok.RequiredArgsConstructor;
+import org.dom4j.Document;
+import org.dom4j.DocumentHelper;
+import org.dom4j.Node;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
 
@@ -20,14 +23,18 @@ public class QueryResultProjectionService {
         }
 
         Map<UUID, RootNodeContext> rootContextByItemId = loadRootNodeContext(rows);
+        Map<UUID, String> rawXmlByItemId = loadItemRawXmlForNodeRows(rows);
+        Map<UUID, Optional<Document>> documentByItemId = new HashMap<>();
         List<Map<String, Object>> projected = new ArrayList<>(rows.size());
 
         for (Map<String, Object> row : rows) {
             UUID itemId = asUuid(row.get("item_id"));
-            String rawText = resolveRawText(row, itemId, rootContextByItemId);
+            String rawText = resolveRawText(row, itemId, rootContextByItemId, rawXmlByItemId, documentByItemId);
 
             Map<String, Object> item = new LinkedHashMap<>();
             item.put("item_id", itemId == null ? "" : itemId.toString());
+            item.put("node_id", safeToString(row.get("node_id")));
+            item.put("node_path", safeToString(row.get("node_path")));
             item.put("lib_id", safeToString(row.get("lib_id")));
             item.put("article_name", safeToString(row.get("article_name")));
             item.put("node_type", safeToString(row.get("node_type")));
@@ -42,6 +49,11 @@ public class QueryResultProjectionService {
     private Map<UUID, RootNodeContext> loadRootNodeContext(List<Map<String, Object>> rows) {
         LinkedHashSet<UUID> itemIds = new LinkedHashSet<>();
         for (Map<String, Object> row : rows) {
+            if (isNodeRow(row)
+                    && !safeToString(row.get("text_position")).isBlank()
+                    && !safeToString(row.get("raw_text")).isBlank()) {
+                continue;
+            }
             UUID itemId = asUuid(row.get("item_id"));
             if (itemId != null) {
                 itemIds.add(itemId);
@@ -87,7 +99,64 @@ public class QueryResultProjectionService {
         return contextByItemId;
     }
 
-    private String resolveRawText(Map<String, Object> row, UUID itemId, Map<UUID, RootNodeContext> contextByItemId) {
+    private Map<UUID, String> loadItemRawXmlForNodeRows(List<Map<String, Object>> rows) {
+        LinkedHashSet<UUID> itemIds = new LinkedHashSet<>();
+        for (Map<String, Object> row : rows) {
+            if (!isNodeRow(row) || safeToString(row.get("node_xmlid")).isBlank()) {
+                continue;
+            }
+            UUID itemId = asUuid(row.get("item_id"));
+            if (itemId != null) {
+                itemIds.add(itemId);
+            }
+        }
+        if (itemIds.isEmpty()) {
+            return Map.of();
+        }
+
+        Map<UUID, String> out = new HashMap<>();
+        String sql = "select id as item_id, raw_xml from mml_item where id in (:itemIds)";
+        for (List<UUID> batch : partitionIds(new ArrayList<>(itemIds), MAX_SQL_IN_IDS)) {
+            List<Map<String, Object>> rawRows = jdbcClient.sql(sql)
+                    .param("itemIds", batch)
+                    .query((rs, rowNum) -> {
+                        Map<String, Object> row = new HashMap<>();
+                        row.put("item_id", rs.getObject("item_id"));
+                        row.put("raw_xml", rs.getObject("raw_xml"));
+                        return row;
+                    })
+                    .list();
+
+            for (Map<String, Object> rawRow : rawRows) {
+                UUID itemId = asUuid(rawRow.get("item_id"));
+                String rawXml = safeToString(rawRow.get("raw_xml"));
+                if (itemId != null && !rawXml.isBlank()) {
+                    out.put(itemId, rawXml);
+                }
+            }
+        }
+        return out;
+    }
+
+    private String resolveRawText(
+            Map<String, Object> row,
+            UUID itemId,
+            Map<UUID, RootNodeContext> contextByItemId,
+            Map<UUID, String> rawXmlByItemId,
+            Map<UUID, Optional<Document>> documentByItemId
+    ) {
+        if (isNodeRow(row)) {
+            String nodeXml = resolveNodeRawXml(row, itemId, rawXmlByItemId, documentByItemId);
+            if (!nodeXml.isBlank()) {
+                return nodeXml;
+            }
+
+            String rawText = safeToString(row.get("raw_text"));
+            if (!rawText.isBlank()) {
+                return rawText;
+            }
+        }
+
         if (itemId != null) {
             RootNodeContext rootNodeContext = contextByItemId.get(itemId);
             if (rootNodeContext != null) {
@@ -107,7 +176,64 @@ public class QueryResultProjectionService {
         return safeToString(row.get("text_content"));
     }
 
+    private boolean isNodeRow(Map<String, Object> row) {
+        return row != null && (
+                !safeToString(row.get("node_id")).isBlank()
+                        || !safeToString(row.get("node_xmlid")).isBlank()
+                        || !safeToString(row.get("node_path")).isBlank()
+        );
+    }
+
+    private String resolveNodeRawXml(
+            Map<String, Object> row,
+            UUID itemId,
+            Map<UUID, String> rawXmlByItemId,
+            Map<UUID, Optional<Document>> documentByItemId
+    ) {
+        if (itemId == null || rawXmlByItemId == null || rawXmlByItemId.isEmpty()) {
+            return "";
+        }
+
+        String nodeXmlId = safeToString(row.get("node_xmlid"));
+        if (nodeXmlId.isBlank()) {
+            return "";
+        }
+
+        Optional<Document> document = documentByItemId.computeIfAbsent(
+                itemId,
+                id -> parseDocument(rawXmlByItemId.get(id))
+        );
+        if (document.isEmpty()) {
+            return "";
+        }
+
+        try {
+            Node node = document.get().selectSingleNode("//*[@xmlid='" + nodeXmlId.replace("'", "") + "']");
+            return node == null ? "" : node.asXML();
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
+    private Optional<Document> parseDocument(String rawXml) {
+        if (rawXml == null || rawXml.isBlank()) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.of(DocumentHelper.parseText(rawXml));
+        } catch (Exception ignored) {
+            return Optional.empty();
+        }
+    }
+
     private String resolveTextPosition(Map<String, Object> row, UUID itemId, Map<UUID, RootNodeContext> contextByItemId) {
+        if (isNodeRow(row)) {
+            String nodePosition = safeToString(row.get("text_position"));
+            if (!nodePosition.isBlank()) {
+                return nodePosition;
+            }
+        }
+
         if (itemId != null) {
             RootNodeContext rootNodeContext = contextByItemId.get(itemId);
             if (rootNodeContext != null && !rootNodeContext.textPosition().isBlank()) {

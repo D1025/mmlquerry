@@ -11,8 +11,14 @@ import {
 import KeyboardArrowDownRoundedIcon from '@mui/icons-material/KeyboardArrowDownRounded'
 import KeyboardArrowUpRoundedIcon from '@mui/icons-material/KeyboardArrowUpRounded'
 import PlayArrowRoundedIcon from '@mui/icons-material/PlayArrowRounded'
+import SearchRoundedIcon from '@mui/icons-material/SearchRounded'
+import TerminalRoundedIcon from '@mui/icons-material/TerminalRounded'
 import {
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
   Alert,
+  AppBar,
   Box,
   Button,
   Card,
@@ -24,6 +30,7 @@ import {
   Divider,
   Grid,
   IconButton,
+  InputAdornment,
   LinearProgress,
   List,
   ListItemButton,
@@ -40,6 +47,8 @@ import {
   TableSortLabel,
   Tabs,
   TextField,
+  Toolbar,
+  Tooltip,
   Typography,
 } from '@mui/material'
 import { useAppDispatch, useAppSelector } from './app/hooks'
@@ -76,6 +85,14 @@ const SUGGESTION_LIST_ID = 'query-suggestion-list'
 const SUGGESTION_OPTION_ID_PREFIX = 'query-suggestion-option'
 const SUGGESTION_MENU_WIDTH = 280
 const WORD_CHAR_REGEX = /[A-Za-z0-9_-]/
+const QUERY_PLACEHOLDER =
+  "Np. list of definition | nodes Item where redefine true and has *[spelling='Noetherian']"
+const TARGET_ATTRIBUTE_DEFINITION_EXAMPLE =
+  "list of definition | nodes Item[kind='Attribute-Definition'] where has Redefine[occurs='true'] and has AttributePattern[spelling='Noetherian']"
+const WILDCARD_ATTRIBUTE_DEFINITION_EXAMPLE =
+  "list of definition | nodes Item where has Redefine[occurs='true'] and has *[spelling='Noetherian']"
+const SHORT_REDEFINE_ATTRIBUTE_DEFINITION_EXAMPLE =
+  "list of definition | nodes Item where redefine true and has *[spelling='Noetherian']"
 
 interface SuggestionPosition {
   top: number
@@ -94,7 +111,14 @@ function compareValues(left: unknown, right: unknown): number {
 }
 
 function buildRowKey(item: QueryItem, index: number): string {
-  return `${item.item_id ?? ''}|${index}`
+  return `${item.node_id || item.item_id || ''}|${index}`
+}
+
+function getResultTabProps(index: number) {
+  return {
+    id: `results-tab-${index}`,
+    'aria-controls': `results-panel-${index}`,
+  }
 }
 
 function getWordStartAtCursor(query: string, cursor: number): number {
@@ -258,9 +282,40 @@ function App() {
     [queryCursor, queryText, syntax],
   )
 
+  const queryExamples = useMemo(() => {
+    const examples = [
+      ...(syntax?.examples ?? []),
+      TARGET_ATTRIBUTE_DEFINITION_EXAMPLE,
+      WILDCARD_ATTRIBUTE_DEFINITION_EXAMPLE,
+      SHORT_REDEFINE_ATTRIBUTE_DEFINITION_EXAMPLE,
+    ]
+    const seen = new Set<string>()
+    return examples.filter((example) => {
+      const normalized = example.trim()
+      if (!normalized || seen.has(normalized)) {
+        return false
+      }
+      seen.add(normalized)
+      return true
+    })
+  }, [syntax?.examples])
+
   const queryValidation = useMemo(() => validateQueryText(queryText, syntax), [queryText, syntax])
 
   const canExecute = queryText.trim().length > 0 && executeStatus !== 'loading'
+  const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8080'
+  const hasQueryErrors = queryValidation.errors.length > 0
+  const syntaxStatusLabel =
+    syntaxStatus === 'loading'
+      ? 'Ladowanie skladni'
+      : syntaxStatus === 'failed'
+        ? 'API niedostepne'
+        : 'Skladnia gotowa'
+  const resultStatusLabel = result
+    ? `${result.count} wynikow`
+    : executeStatus === 'loading'
+      ? 'Wykonywanie query'
+      : 'Brak wyniku'
   const activeSuggestionIndex =
     querySuggestions.length === 0
       ? 0
@@ -313,20 +368,52 @@ function App() {
     setSelectedSuggestionIndex(0)
   }
 
-  const acceptSuggestion = (suggestion: string) => {
-    const { query, nextCursor } = applySuggestionAtCursor(queryText, queryCursor, suggestion)
-    dispatch(setQueryText(query))
-    setQueryCursor(nextCursor)
-    setSelectedSuggestionIndex(0)
+  const focusQueryAt = (cursor: number) => {
     requestAnimationFrame(() => {
       const input = queryInputRef.current
       if (!input) return
       input.focus()
-      input.setSelectionRange(nextCursor, nextCursor)
+      input.setSelectionRange(cursor, cursor)
     })
   }
 
+  const setQueryAndCursor = (nextQuery: string, nextCursor: number) => {
+    dispatch(setQueryText(nextQuery))
+    setQueryCursor(nextCursor)
+    setSelectedSuggestionIndex(0)
+    focusQueryAt(nextCursor)
+  }
+
+  const acceptSuggestion = (suggestion: string) => {
+    const { query, nextCursor } = applySuggestionAtCursor(queryText, queryCursor, suggestion)
+    setQueryAndCursor(query, nextCursor)
+  }
+
+  const appendQueryToken = (token: string) => {
+    const input = queryInputRef.current
+    const cursor = input?.selectionStart ?? queryCursor
+    const before = queryText.slice(0, cursor)
+    const after = queryText.slice(cursor)
+    const needsLeadingSpace = before.length > 0 && !/\s|\(|\[|\|/.test(before.charAt(before.length - 1))
+    const needsTrailingSpace = after.length > 0 && !/\s|\)|\]|\||,/.test(after.charAt(0))
+    const insertValue = `${needsLeadingSpace ? ' ' : ''}${token}`
+    const nextQuery = `${before}${insertValue}${needsTrailingSpace ? ' ' : ''}${after}`
+    setQueryAndCursor(nextQuery, before.length + insertValue.length)
+  }
+
+  const handleExampleSelect = (example: string) => {
+    setQueryAndCursor(example, example.length)
+  }
+
   const handleQueryKeyDown = (event: KeyboardEvent<HTMLTextAreaElement | HTMLInputElement>) => {
+    if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+      event.preventDefault()
+      if (canExecute) {
+        handleRunQuery()
+      }
+      return
+    }
+
     if (querySuggestions.length === 0) {
       return
     }
@@ -414,6 +501,11 @@ function App() {
       [rowKey]: willExpand,
     }))
 
+    if (willExpand && item.node_id?.trim() && !expandedRawByRowKey[rowKey]) {
+      setExpandedRawByRowKey((current) => ({ ...current, [rowKey]: item.raw ?? '' }))
+      return
+    }
+
     if (
       willExpand &&
       !expandedRawByRowKey[rowKey] &&
@@ -424,20 +516,116 @@ function App() {
   }
 
   return (
-    <Container maxWidth="xl" sx={{ py: 4 }}>
-      <Stack spacing={3}>
-        <Box>
-          <Typography variant="h4" sx={{ fontWeight: 700 }} gutterBottom>
-            Mizar Query Workbench
-          </Typography>
-        </Box>
+    <Box sx={{ minHeight: '100vh' }}>
+      <AppBar
+        position="sticky"
+        color="inherit"
+        elevation={0}
+        sx={{
+          borderBottom: 1,
+          borderColor: 'divider',
+          bgcolor: 'rgba(255,255,255,0.92)',
+          backdropFilter: 'blur(10px)',
+        }}
+      >
+        <Toolbar
+          sx={{
+            gap: 2,
+            minHeight: { xs: 64, md: 56 },
+            px: { xs: 2, md: 3 },
+            flexWrap: 'wrap',
+          }}
+        >
+          <Stack direction="row" spacing={1.25} sx={{ alignItems: 'center', minWidth: 260 }}>
+            <Box
+              sx={{
+                width: 36,
+                height: 36,
+                display: 'grid',
+                placeItems: 'center',
+                borderRadius: 1.5,
+                bgcolor: 'primary.main',
+                color: 'primary.contrastText',
+              }}
+            >
+              <TerminalRoundedIcon fontSize="small" />
+            </Box>
+            <Box>
+              <Typography variant="h4">Mizar Query Workbench</Typography>
+              <Typography variant="caption" color="text.secondary">
+                Edytor zapytan i analiza wynikow MML
+              </Typography>
+            </Box>
+          </Stack>
 
-        <Grid container spacing={3}>
-          <Grid size={{ xs: 12, md: 8 }}>
-            <Card sx={{ borderRadius: 3 }}>
-              <CardContent>
+          <Stack
+            direction="row"
+            spacing={1}
+            useFlexGap
+            sx={{ ml: { md: 'auto' }, flexWrap: 'wrap', alignItems: 'center' }}
+          >
+            <Chip
+              size="small"
+              color={
+                syntaxStatus === 'failed'
+                  ? 'error'
+                  : syntaxStatus === 'loading'
+                    ? 'warning'
+                    : 'success'
+              }
+              variant="outlined"
+              label={syntaxStatusLabel}
+            />
+            <Tooltip title={apiBaseUrl}>
+              <Chip size="small" variant="outlined" label="API" />
+            </Tooltip>
+            <Chip size="small" variant="outlined" label={resultStatusLabel} />
+          </Stack>
+        </Toolbar>
+      </AppBar>
+
+      <Container
+        maxWidth={false}
+        sx={{
+          maxWidth: 1800,
+          py: { xs: 2, md: 3 },
+          px: { xs: 2, md: 3 },
+        }}
+      >
+        <Stack spacing={2.5}>
+        <Grid container spacing={2.5} sx={{ alignItems: 'stretch' }}>
+          <Grid size={{ xs: 12, lg: 8 }}>
+            <Card sx={{ borderRadius: 2, height: '100%' }}>
+              <CardContent sx={{ p: { xs: 2, md: 2.5 }, '&:last-child': { pb: { xs: 2, md: 2.5 } } }}>
                 <Stack spacing={2.5}>
-                  <Typography variant="h6">Query editor</Typography>
+                  <Stack
+                    direction={{ xs: 'column', sm: 'row' }}
+                    spacing={1.5}
+                    sx={{ justifyContent: 'space-between', alignItems: { xs: 'flex-start', sm: 'center' } }}
+                  >
+                    <Box>
+                      <Typography variant="h6">Query editor</Typography>
+                      <Typography variant="body2" color="text.secondary">
+                        Pisz query, korzystaj z podpowiedzi i uruchamiaj wynik bez odrywania rak od klawiatury.
+                      </Typography>
+                    </Box>
+                    <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: 'wrap' }}>
+                      <Chip
+                        size="small"
+                        color={hasQueryErrors ? 'error' : 'success'}
+                        variant={hasQueryErrors ? 'filled' : 'outlined'}
+                        label={hasQueryErrors ? `${queryValidation.errors.length} bledow` : 'Query OK'}
+                      />
+                      {queryValidation.warnings.length > 0 && (
+                        <Chip
+                          size="small"
+                          color="warning"
+                          variant="outlined"
+                          label={`${queryValidation.warnings.length} ostrzezen`}
+                        />
+                      )}
+                    </Stack>
+                  </Stack>
                   <Box>
                     <TextField
                       label="MML Query"
@@ -464,8 +652,15 @@ function App() {
                       }}
                       fullWidth
                       multiline
-                      minRows={5}
-                      placeholder="Np. list of definition where item has Redefine[occurs='true'] and item has AttributePattern[spelling='Noetherian']"
+                      minRows={7}
+                      placeholder={QUERY_PLACEHOLDER}
+                      sx={{
+                        '& textarea': {
+                          fontFamily:
+                            'ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace',
+                          lineHeight: 1.55,
+                        },
+                      }}
                     />
                     {isSuggestionListOpen && suggestionPosition && (
                       <Paper
@@ -523,7 +718,7 @@ function App() {
                   <Stack
                     direction={{ xs: 'column', sm: 'row' }}
                     spacing={1.5}
-                    sx={{ alignItems: 'center' }}
+                    sx={{ alignItems: { xs: 'stretch', sm: 'center' } }}
                   >
                     <Button
                       variant="contained"
@@ -540,28 +735,35 @@ function App() {
                       Uruchom zapytanie
                     </Button>
                     <Typography variant="body2" color="text.secondary">
-                      API: {import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8080'}
+                      Skrot: Ctrl+Enter. Podpowiedz zatwierdzisz Tabem.
                     </Typography>
                   </Stack>
 
-                  {syntaxStatus === 'loading' && <LinearProgress />}
-                  {syntaxError && <Alert severity="error">{syntaxError}</Alert>}
-                  {syntax?.examples && (
+                  {queryExamples.length > 0 && (
                     <>
                       <Divider />
-                      <Typography variant="subtitle2" color="text.secondary">
-                        Przyklady zapytan
-                      </Typography>
-                      <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: 'wrap' }}>
-                        {syntax.examples.map((example) => (
-                          <Chip
-                            key={example}
-                            label={example}
-                            onClick={() => dispatch(setQueryText(example))}
-                            variant="outlined"
-                          />
-                        ))}
-                      </Stack>
+                      <Accordion disableGutters elevation={0} sx={{ border: 0, '&::before': { display: 'none' } }}>
+                        <AccordionSummary
+                          expandIcon={<KeyboardArrowDownRoundedIcon />}
+                          sx={{ minHeight: 40, px: 0, '& .MuiAccordionSummary-content': { my: 0.5 } }}
+                        >
+                          <Typography variant="subtitle2" color="text.secondary">
+                            Przyklady zapytan
+                          </Typography>
+                        </AccordionSummary>
+                        <AccordionDetails sx={{ px: 0, pt: 0 }}>
+                          <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: 'wrap' }}>
+                            {queryExamples.map((example) => (
+                              <Chip
+                                key={example}
+                                label={example}
+                                onClick={() => handleExampleSelect(example)}
+                                variant="outlined"
+                              />
+                            ))}
+                          </Stack>
+                        </AccordionDetails>
+                      </Accordion>
                     </>
                   )}
                 </Stack>
@@ -569,51 +771,150 @@ function App() {
             </Card>
           </Grid>
 
-          <Grid size={{ xs: 12, md: 4 }}>
-            <Card sx={{ borderRadius: 3, height: '100%' }}>
-              <CardContent>
+          <Grid size={{ xs: 12, lg: 4 }}>
+            <Card sx={{ borderRadius: 2, height: '100%' }}>
+              <CardContent sx={{ p: { xs: 2, md: 2.5 }, '&:last-child': { pb: { xs: 2, md: 2.5 } } }}>
                 <Stack spacing={2}>
-                  <Typography variant="h6">Skladnia i operacje</Typography>
-                  <Typography variant="subtitle2" color="text.secondary">
-                    Operatory logiczne
-                  </Typography>
-                  <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: 'wrap' }}>
-                    {syntax?.supportedOperators.map((operator) => (
-                      <Chip key={operator} label={operator} size="small" />
-                    ))}
-                  </Stack>
+                  <Box>
+                    <Typography variant="h6">Skladnia i operacje</Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      Kliknij element, zeby wstawic go w miejscu kursora.
+                    </Typography>
+                  </Box>
 
-                  <Typography variant="subtitle2" color="text.secondary">
-                    Pipeline
-                  </Typography>
-                  <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: 'wrap' }}>
-                    {syntax?.supportedPipelineOperations.map((operation) => (
-                      <Chip key={operation} label={operation} size="small" variant="outlined" />
-                    ))}
-                  </Stack>
+                  {syntaxStatus === 'loading' && <LinearProgress />}
+                  {syntaxError && <Alert severity="error">{syntaxError}</Alert>}
+
+                  <Box>
+                    <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+                      Operatory logiczne
+                    </Typography>
+                    <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: 'wrap' }}>
+                      {(syntax?.supportedOperators ?? []).map((operator) => (
+                        <Chip
+                          key={operator}
+                          label={operator}
+                          size="small"
+                          onClick={() => appendQueryToken(operator)}
+                        />
+                      ))}
+                    </Stack>
+                  </Box>
+
+                  <Box>
+                    <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+                      Pipeline
+                    </Typography>
+                    <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: 'wrap' }}>
+                      {(syntax?.supportedPipelineOperations ?? []).map((operation) => (
+                        <Chip
+                          key={operation}
+                          label={operation}
+                          size="small"
+                          variant="outlined"
+                          onClick={() => appendQueryToken(operation)}
+                        />
+                      ))}
+                    </Stack>
+                  </Box>
+
+                  {(syntax?.supportedAttributeNames?.length ?? 0) > 0 && (
+                    <Box>
+                      <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+                        Atrybuty
+                      </Typography>
+                      <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: 'wrap' }}>
+                        {(syntax?.supportedAttributeNames ?? []).slice(0, 18).map((attribute) => (
+                          <Chip
+                            key={attribute}
+                            label={attribute}
+                            size="small"
+                            variant="outlined"
+                            onClick={() => appendQueryToken(attribute)}
+                          />
+                        ))}
+                      </Stack>
+                    </Box>
+                  )}
+
+                  {(syntax?.supportedNodeNames?.length ?? 0) > 0 && (
+                    <Box>
+                      <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+                        Popularne nody
+                      </Typography>
+                      <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: 'wrap' }}>
+                        {(syntax?.supportedNodeNames ?? []).slice(0, 12).map((nodeName) => (
+                          <Chip
+                            key={nodeName}
+                            label={nodeName}
+                            size="small"
+                            variant="outlined"
+                            onClick={() => appendQueryToken(nodeName)}
+                          />
+                        ))}
+                      </Stack>
+                    </Box>
+                  )}
                 </Stack>
               </CardContent>
             </Card>
           </Grid>
         </Grid>
 
-        <Card sx={{ borderRadius: 3 }}>
+        <Card sx={{ borderRadius: 2 }}>
           {executeStatus === 'loading' && <LinearProgress />}
-          <CardContent>
+          <CardContent sx={{ p: { xs: 2, md: 2.5 }, '&:last-child': { pb: { xs: 2, md: 2.5 } } }}>
             <Stack spacing={2}>
-              <Box>
-                <Typography variant="h6">Wyniki</Typography>
-                <Typography variant="body2" color="text.secondary">
-                  {result
-                    ? `${result.description} - ${result.count} elementow`
-                    : 'Uruchom zapytanie, aby zobaczyc wyniki.'}
-                </Typography>
-              </Box>
+              <Stack
+                direction={{ xs: 'column', md: 'row' }}
+                spacing={1.5}
+                sx={{ justifyContent: 'space-between', alignItems: { xs: 'flex-start', md: 'center' } }}
+              >
+                <Box>
+                  <Typography variant="h6">Wyniki</Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    {result
+                      ? result.description
+                      : 'Uruchom zapytanie, aby zobaczyc wyniki i szczegoly rekordow.'}
+                  </Typography>
+                </Box>
+                <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: 'wrap' }}>
+                  <Chip size="small" variant="outlined" label={result ? `${result.count} rekordow` : '0 rekordow'} />
+                  {result && (
+                    <Chip
+                      size="small"
+                      variant="outlined"
+                      label={`${filteredSortedRows.length} po filtrze`}
+                    />
+                  )}
+                  {result?.timing && (
+                    <>
+                      <Chip size="small" variant="outlined" label={`total ${result.timing.totalMs} ms`} />
+                      <Chip size="small" variant="outlined" label={`SQL ${result.timing.executeMs} ms`} />
+                      <Chip size="small" variant="outlined" label={`XML ${result.timing.projectionMs} ms`} />
+                    </>
+                  )}
+                </Stack>
+              </Stack>
 
               {executeError && <Alert severity="error">{executeError}</Alert>}
 
               {!result && executeStatus !== 'loading' && (
-                <Alert severity="info">Brak danych do wyswietlenia.</Alert>
+                <Paper
+                  variant="outlined"
+                  sx={{
+                    p: { xs: 2, md: 3 },
+                    borderStyle: 'dashed',
+                    bgcolor: 'background.default',
+                  }}
+                >
+                  <Stack spacing={1}>
+                    <Typography variant="subtitle2">Brak wyniku</Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      Wpisz query albo wybierz przyklad, a potem uruchom zapytanie.
+                    </Typography>
+                  </Stack>
+                </Paper>
               )}
 
               {result && (
@@ -623,14 +924,21 @@ function App() {
                     onChange={(_event, newValue: number) => setTab(newValue)}
                     variant="scrollable"
                     scrollButtons="auto"
+                    aria-label="Widoki wynikow"
+                    sx={{ borderBottom: 1, borderColor: 'divider' }}
                   >
-                    <Tab label="Items" />
-                    <Tab label="AST" />
-                    <Tab label="Response JSON" />
+                    <Tab label="Items" {...getResultTabProps(0)} />
+                    <Tab label="AST" {...getResultTabProps(1)} />
+                    <Tab label="Response JSON" {...getResultTabProps(2)} />
                   </Tabs>
 
                   {tab === 0 && (
-                    <Box>
+                    <Box
+                      id="results-panel-0"
+                      role="tabpanel"
+                      aria-labelledby="results-tab-0"
+                      sx={{ pt: 1 }}
+                    >
                       {result.items.length === 0 && (
                         <Alert severity="info">Zapytanie zwrocilo pusty wynik.</Alert>
                       )}
@@ -646,6 +954,15 @@ function App() {
                               resetResultViewState()
                             }}
                             placeholder="Szukaj we wszystkich kolumnach"
+                            slotProps={{
+                              input: {
+                                startAdornment: (
+                                  <InputAdornment position="start">
+                                    <SearchRoundedIcon fontSize="small" />
+                                  </InputAdornment>
+                                ),
+                              },
+                            }}
                           />
 
                           <Typography variant="caption" color="text.secondary">
@@ -683,7 +1000,9 @@ function App() {
                               <TableBody>
                                 {pagedRows.map(({ item, rowKey }) => {
                                   const isExpanded = Boolean(expandedRows[rowKey])
-                                  const canExpand = (item.item_id ?? '').trim().length > 0
+                                  const canExpand =
+                                    (item.item_id ?? '').trim().length > 0 ||
+                                    (item.node_id ?? '').trim().length > 0
                                   const expandedRaw = expandedRawByRowKey[rowKey] ?? ''
                                   const expandedRawLoading = Boolean(expandedRawLoadingByRowKey[rowKey])
                                   const expandedRawError = expandedRawErrorByRowKey[rowKey] ?? ''
@@ -788,6 +1107,9 @@ function App() {
 
                   {tab === 1 && (
                     <Box
+                      id="results-panel-1"
+                      role="tabpanel"
+                      aria-labelledby="results-tab-1"
                       sx={{
                         p: 2,
                         border: 1,
@@ -804,6 +1126,9 @@ function App() {
 
                   {tab === 2 && (
                     <Box
+                      id="results-panel-2"
+                      role="tabpanel"
+                      aria-labelledby="results-tab-2"
                       sx={{
                         p: 2,
                         border: 1,
@@ -822,8 +1147,9 @@ function App() {
             </Stack>
           </CardContent>
         </Card>
-      </Stack>
-    </Container>
+        </Stack>
+      </Container>
+    </Box>
   )
 }
 
