@@ -19,6 +19,8 @@ import java.util.regex.PatternSyntaxException;
 @RequiredArgsConstructor
 public class QueryEvaluationService {
 
+    private static final String SQL_LIKE_ESCAPE_CLAUSE = " escape '\\'";
+
     private static final Map<String, List<String>> ATTRIBUTE_KEY_CANDIDATES = Map.ofEntries(
             Map.entry("absoluteconstrmmlid", List.of("absoluteconstrMMLId", "absoluteconstrmmlid")),
             Map.entry("absolutenr", List.of("absolutenr")),
@@ -48,9 +50,6 @@ public class QueryEvaluationService {
         if (query instanceof ListQueryNode node) {
             return visitListQuery(node);
         }
-        if (query instanceof ConstructorQueryNode node) {
-            return visitConstructorQuery(node);
-        }
         if (query instanceof ArticleQueryNode node) {
             return visitArticleQuery(node);
         }
@@ -75,16 +74,183 @@ public class QueryEvaluationService {
         throw new IllegalArgumentException("Unsupported query node: " + query.getClass().getName());
     }
 
+    public PagedListQueryResult evaluatePagedListQuery(
+            ListQueryNode node,
+            int page,
+            int size,
+            String sortBy,
+            String sortDirection,
+            String filter
+    ) {
+        if (node == null) {
+            throw new IllegalArgumentException("List query node is required for paged evaluation.");
+        }
+
+        String source = normalizeSource(node.getSource());
+        PagedListPlan plan = buildPagedListPlan(node, source);
+
+        String normalizedFilter = normalizeLookupValue(filter);
+        String filterPattern = normalizedFilter.isBlank() ? null : toSqlLikeContainsPattern(normalizedFilter);
+        String filterClause = buildFilterClause(plan.listType(), filterPattern != null);
+
+        SortResolution sortResolution = resolveSort(plan.listType(), sortBy, sortDirection);
+        int safeSize = Math.max(1, size);
+        int safePage = Math.max(0, page);
+
+        Map<String, Object> params = new LinkedHashMap<>(plan.params());
+        if (filterPattern != null) {
+            params.put("filterPattern", filterPattern);
+        }
+
+        String countSql = """
+                with base as (
+                %s
+                )
+                select count(*)
+                from base q
+                where 1=1
+                %s
+                """.formatted(plan.baseSql(), filterClause);
+        int totalCount = queryCount(countSql, params);
+
+        int maxPage = totalCount == 0 ? 0 : (totalCount - 1) / safeSize;
+        int effectivePage = Math.min(safePage, maxPage);
+        int offset = effectivePage * safeSize;
+        params.put("limit", safeSize);
+        params.put("offset", offset);
+
+        String pageSql = """
+                with base as (
+                %s
+                )
+                select *
+                from base q
+                where 1=1
+                %s
+                order by %s
+                limit :limit
+                offset :offset
+                """.formatted(plan.baseSql(), filterClause, sortResolution.orderClause());
+
+        List<Map<String, Object>> data = plan.genericRows()
+                ? queryGenericRows(pageSql, params)
+                : queryRows(pageSql, params);
+
+        return new PagedListQueryResult(
+                data,
+                totalCount,
+                "List query: " + node.getListType(),
+                effectivePage,
+                safeSize,
+                sortResolution.sortByKey(),
+                sortResolution.sortDirection(),
+                filterPattern == null ? null : filter
+        );
+    }
+
     private QueryResult visitListQuery(ListQueryNode node) {
         String source = normalizeSource(node.getSource());
-        String sql = switch (node.getListType()) {
-            case CONSTRUCTORS -> """
-                    select vc.item_id, vc.lib_id, vc.article_name, vc.kind,
-                           vc.constructor_kind as subkind, vc.text_content, 'constructors' as node_type
-                    from view_constructors vc
-                    where :source = '*'
-                       or vc.article_name = :source
+        if (node.getListType() == ListType.SYMBOLS) {
+            Map<String, Object> params = new LinkedHashMap<>();
+            params.put("source", source);
+            String sql = buildSymbolNodesBaseSql(params, node.getSymbolSpellingFilter())
+                    + "\norder by a.name asc, mi.lib_id asc, n.item_id asc, n.pos asc, n.id asc";
+            return new QueryResult(queryRows(sql, params), "List query: " + node.getListType());
+        }
+        if (node.getListType() == ListType.SYMBOL_OCCURRENCES) {
+            String sql = """
+                    select trim(coalesce(n.details -> 'attrs' ->> 'spelling', '')) as spelling,
+                           count(*) as occurrences
+                    from item_node n
+                    join mml_item mi on mi.id = n.item_id
+                    join article a on a.id = mi.article_id
+                    where (:source = '*' or a.name = :source)
+                      and right(lower(coalesce(n.details ->> 'tag', '')), 8) = '-pattern'
+                      and nullif(trim(coalesce(n.details -> 'attrs' ->> 'spelling', '')), '') is not null
+                    group by trim(coalesce(n.details -> 'attrs' ->> 'spelling', ''))
+                    order by occurrences desc, spelling asc
                     """;
+            return new QueryResult(queryGenericRows(sql, Map.of("source", source)), "List query: " + node.getListType());
+        }
+
+        String sql = switch (node.getListType()) {
+            case THEOREMS -> """
+                    select vt.item_id, vt.lib_id, vt.article_name, vt.kind,
+                           vt.subkind, vt.text_content, vt.node_type
+                    from view_theorems vt
+                    where :source = '*'
+                       or vt.article_name = :source
+                    """;
+            case DEFINITIONS -> """
+                    select vd.item_id, vd.lib_id, vd.article_name, vd.kind,
+                           vd.subkind, vd.text_content, vd.node_type
+                    from view_definitions vd
+                    where :source = '*'
+                       or vd.article_name = :source
+                    """;
+            case STATEMENTS -> """
+                    select vs.item_id, vs.lib_id, vs.article_name, vs.kind,
+                           vs.subkind, vs.text_content, vs.node_type
+                    from view_statements vs
+                    where :source = '*'
+                       or vs.article_name = :source
+                    """;
+            case REGISTRATIONS -> """
+                    select vr.item_id, vr.lib_id, vr.article_name, vr.kind,
+                           vr.subkind, vr.text_content, vr.node_type
+                    from view_registrations vr
+                    where :source = '*'
+                       or vr.article_name = :source
+                    """;
+            case SYMBOLS -> throw new IllegalStateException("Unexpected symbol list dispatch.");
+            case SYMBOL_OCCURRENCES -> throw new IllegalStateException("Unexpected symbol-occurrence list dispatch.");
+            case ALL -> """
+                    select vi.id as item_id,
+                           vi.lib_id,
+                           vi.article_name,
+                           vi.kind,
+                           vi.subkind,
+                           vi.text_content,
+                           case
+                               when vi.kind = 'statement' and vi.subkind = 'th' then 'theorems'
+                               when vi.kind = 'statement' and vi.subkind in ('def', 'dfs') then 'definitions'
+                               when vi.kind = 'statement' and vi.subkind = 'sch' then 'schemes'
+                               when vi.kind = 'registration' then 'registrations'
+                               else vi.kind
+                            end as node_type
+                    from view_items vi
+                    where :source = '*'
+                       or vi.article_name = :source
+                    """;
+        };
+        return new QueryResult(queryRows(sql, Map.of("source", source)), "List query: " + node.getListType());
+    }
+
+    private PagedListPlan buildPagedListPlan(ListQueryNode queryNode, String source) {
+        ListType listType = queryNode.getListType();
+        Map<String, Object> params = new LinkedHashMap<>();
+        params.put("source", source);
+
+        if (listType == ListType.SYMBOLS) {
+            String baseSql = buildSymbolNodesBaseSql(params, queryNode.getSymbolSpellingFilter());
+            return new PagedListPlan(listType, baseSql, params, false);
+        }
+        if (listType == ListType.SYMBOL_OCCURRENCES) {
+            String baseSql = """
+                    select trim(coalesce(n.details -> 'attrs' ->> 'spelling', '')) as spelling,
+                           count(*) as occurrences
+                    from item_node n
+                    join mml_item mi on mi.id = n.item_id
+                    join article a on a.id = mi.article_id
+                    where (:source = '*' or a.name = :source)
+                      and right(lower(coalesce(n.details ->> 'tag', '')), 8) = '-pattern'
+                      and nullif(trim(coalesce(n.details -> 'attrs' ->> 'spelling', '')), '') is not null
+                    group by trim(coalesce(n.details -> 'attrs' ->> 'spelling', ''))
+                    """;
+            return new PagedListPlan(listType, baseSql, params, true);
+        }
+
+        String baseSql = switch (listType) {
             case THEOREMS -> """
                     select vt.item_id, vt.lib_id, vt.article_name, vt.kind,
                            vt.subkind, vt.text_content, vt.node_type
@@ -121,7 +287,6 @@ public class QueryEvaluationService {
                            vi.subkind,
                            vi.text_content,
                            case
-                               when vi.kind = 'constructor' then 'constructors'
                                when vi.kind = 'statement' and vi.subkind = 'th' then 'theorems'
                                when vi.kind = 'statement' and vi.subkind in ('def', 'dfs') then 'definitions'
                                when vi.kind = 'statement' and vi.subkind = 'sch' then 'schemes'
@@ -132,48 +297,148 @@ public class QueryEvaluationService {
                     where :source = '*'
                        or vi.article_name = :source
                     """;
+            case SYMBOLS, SYMBOL_OCCURRENCES -> throw new IllegalStateException(
+                    "Unexpected symbol list dispatch in entity plan."
+            );
         };
-        return new QueryResult(queryRows(sql, Map.of("source", source)), "List query: " + node.getListType());
+        return new PagedListPlan(listType, baseSql, params, false);
     }
 
-    private QueryResult visitConstructorQuery(ConstructorQueryNode node) {
-        String kind = node.getKind() == null ? "" : node.getKind().toLowerCase(Locale.ROOT);
-        String sql;
-        if (Set.of("func", "pred", "attr", "mode", "sel", "aggr", "struct").contains(kind)) {
-            sql = """
-                    select vc.item_id, vc.lib_id, vc.article_name, vc.kind,
-                           vc.constructor_kind as subkind, vc.text_content, 'constructors' as node_type
-                    from view_constructors vc
-                    where vc.article_name = :articleName
-                      and vc.constructor_kind = :kind
-                      and vc.number = :number
-                    """;
-        } else {
-            sql = """
-                    select vi.id as item_id,
-                           vi.lib_id,
-                           vi.article_name,
-                           vi.kind,
-                           vi.subkind,
-                           vi.text_content,
-                           case
-                               when vi.kind = 'statement' and vi.subkind = 'th' then 'theorems'
-                               when vi.kind = 'statement' and vi.subkind in ('def', 'dfs') then 'definitions'
-                               when vi.kind = 'statement' and vi.subkind = 'sch' then 'schemes'
-                               when vi.kind = 'registration' then 'registrations'
-                               else vi.kind
-                            end as node_type
-                    from view_items vi
-                    where vi.article_name = :articleName
-                      and vi.subkind = :kind
-                      and vi.number = :number
+    private String buildSymbolNodesBaseSql(Map<String, Object> params, String spellingFilterRaw) {
+        StringBuilder sql = new StringBuilder("""
+                select n.item_id,
+                       mi.lib_id,
+                       a.name as article_name,
+                       mi.kind,
+                       mi.subkind,
+                       mi.text_content,
+                       'symbols' as node_type,
+                       n.id as node_id,
+                       coalesce(n.details -> 'attrs' ->> 'position', cast(n.pos as text)) as text_position,
+                       n.node_path,
+                       n.details ->> 'tag' as node_tag,
+                       n.details -> 'attrs' ->> 'xmlid' as node_xmlid,
+                       trim(coalesce(n.details -> 'attrs' ->> 'spelling', '')) as spelling
+                from item_node n
+                join mml_item mi on mi.id = n.item_id
+                join article a on a.id = mi.article_id
+                where (:source = '*' or a.name = :source)
+                  and right(lower(coalesce(n.details ->> 'tag', '')), 8) = '-pattern'
+                  and nullif(trim(coalesce(n.details -> 'attrs' ->> 'spelling', '')), '') is not null
+                """);
+
+        String normalizedSpellingFilter = normalizeLookupValue(spellingFilterRaw);
+        if (!normalizedSpellingFilter.isBlank()) {
+            boolean patternSpelling = isPatternLikeValue(normalizedSpellingFilter);
+            sql.append("\n  and lower(coalesce(n.details -> 'attrs' ->> 'spelling', ''))");
+            if (patternSpelling) {
+                sql.append(" like :symbolSpellingPattern").append(SQL_LIKE_ESCAPE_CLAUSE);
+                params.put("symbolSpellingPattern", toSqlLikePattern(normalizedSpellingFilter));
+            } else {
+                sql.append(" = :symbolSpelling");
+                params.put("symbolSpelling", unescapePatternLiterals(normalizedSpellingFilter));
+            }
+        }
+        return sql.toString();
+    }
+
+    private String buildFilterClause(ListType listType, boolean includeFilter) {
+        if (!includeFilter) {
+            return "";
+        }
+
+        if (listType == ListType.SYMBOLS) {
+            return """
+                      and (
+                          lower(coalesce(q.spelling, '')) like :filterPattern escape '\\'
+                          or lower(coalesce(q.article_name, '')) like :filterPattern escape '\\'
+                          or lower(coalesce(q.lib_id, '')) like :filterPattern escape '\\'
+                          or lower(coalesce(q.kind, '')) like :filterPattern escape '\\'
+                          or lower(coalesce(q.subkind, '')) like :filterPattern escape '\\'
+                          or lower(coalesce(q.node_type, '')) like :filterPattern escape '\\'
+                          or lower(coalesce(q.text_content, '')) like :filterPattern escape '\\'
+                          or lower(coalesce(cast(q.item_id as text), '')) like :filterPattern escape '\\'
+                      )
                     """;
         }
-        return new QueryResult(queryRows(sql, Map.of(
-                "articleName", node.getArticleName(),
-                "kind", kind,
-                "number", node.getNumber()
-        )), "Constructor-like query");
+        if (listType == ListType.SYMBOL_OCCURRENCES) {
+            return """
+                      and (
+                          lower(coalesce(q.spelling, '')) like :filterPattern escape '\\'
+                          or lower(coalesce(cast(q.occurrences as text), '')) like :filterPattern escape '\\'
+                      )
+                    """;
+        }
+
+        return """
+                  and (
+                      lower(coalesce(q.article_name, '')) like :filterPattern escape '\\'
+                      or lower(coalesce(q.lib_id, '')) like :filterPattern escape '\\'
+                      or lower(coalesce(q.kind, '')) like :filterPattern escape '\\'
+                      or lower(coalesce(q.subkind, '')) like :filterPattern escape '\\'
+                      or lower(coalesce(q.node_type, '')) like :filterPattern escape '\\'
+                      or lower(coalesce(q.text_content, '')) like :filterPattern escape '\\'
+                      or lower(coalesce(cast(q.item_id as text), '')) like :filterPattern escape '\\'
+                  )
+                """;
+    }
+
+    private SortResolution resolveSort(ListType listType, String requestedSortBy, String requestedSortDirection) {
+        String direction = "desc".equalsIgnoreCase(safeToString(requestedSortDirection).trim()) ? "desc" : "asc";
+        String normalizedSortBy = safeToString(requestedSortBy).trim().toLowerCase(Locale.ROOT);
+
+        if (listType == ListType.SYMBOL_OCCURRENCES) {
+            if ("spelling".equals(normalizedSortBy)) {
+                return new SortResolution("q.spelling " + direction + " nulls last", "spelling", direction);
+            }
+            if ("occurrences".equals(normalizedSortBy) || "count".equals(normalizedSortBy)) {
+                return new SortResolution("q.occurrences " + direction + " nulls last", "occurrences", direction);
+            }
+            return new SortResolution("q.occurrences desc, q.spelling asc", "occurrences", "desc");
+        }
+
+        if (listType == ListType.SYMBOLS) {
+            Map<String, String> symbolSortColumns = Map.ofEntries(
+                    Map.entry("spelling", "q.spelling"),
+                    Map.entry("item_id", "q.item_id"),
+                    Map.entry("lib_id", "q.lib_id"),
+                    Map.entry("article_name", "q.article_name"),
+                    Map.entry("kind", "q.kind"),
+                    Map.entry("subkind", "q.subkind"),
+                    Map.entry("node_type", "q.node_type"),
+                    Map.entry("text_position", "q.text_position"),
+                    Map.entry("raw", "q.text_content"),
+                    Map.entry("raw_text", "q.text_content"),
+                    Map.entry("text_content", "q.text_content")
+            );
+            String expression = symbolSortColumns.get(normalizedSortBy);
+            if (expression != null) {
+                return new SortResolution(expression + " " + direction + " nulls last", normalizedSortBy, direction);
+            }
+            if ("spelling".equals(normalizedSortBy)) {
+                return new SortResolution("q.spelling " + direction + " nulls last", "spelling", direction);
+            }
+            return new SortResolution("q.spelling asc, q.article_name asc, q.lib_id asc, q.item_id asc", "spelling", "asc");
+        }
+
+        Map<String, String> entitySortColumns = Map.ofEntries(
+                Map.entry("item_id", "q.item_id"),
+                Map.entry("lib_id", "q.lib_id"),
+                Map.entry("article_name", "q.article_name"),
+                Map.entry("kind", "q.kind"),
+                Map.entry("subkind", "q.subkind"),
+                Map.entry("node_type", "q.node_type"),
+                Map.entry("raw", "q.text_content"),
+                Map.entry("raw_text", "q.text_content"),
+                Map.entry("text_content", "q.text_content"),
+                Map.entry("text_position", "q.text_content")
+        );
+        String expression = entitySortColumns.get(normalizedSortBy);
+        if (expression != null) {
+            return new SortResolution(expression + " " + direction + " nulls last", normalizedSortBy, direction);
+        }
+
+        return new SortResolution("q.article_name asc, q.lib_id asc, q.item_id asc", "article_name", "asc");
     }
 
     private QueryResult visitArticleQuery(ArticleQueryNode node) {
@@ -185,7 +450,6 @@ public class QueryEvaluationService {
                        vi.subkind,
                        vi.text_content,
                        case
-                           when vi.kind = 'constructor' then 'constructors'
                            when vi.kind = 'statement' and vi.subkind = 'th' then 'theorems'
                            when vi.kind = 'statement' and vi.subkind in ('def', 'dfs') then 'definitions'
                            when vi.kind = 'statement' and vi.subkind = 'sch' then 'schemes'
@@ -238,15 +502,7 @@ public class QueryEvaluationService {
     }
 
     private QueryResult visitEnumeratedList(EnumeratedListNode node) {
-        if (node.getItems() == null || node.getItems().isEmpty()) {
-            return new QueryResult(List.of(), "Enumerated list is empty");
-        }
-        List<Map<String, Object>> rows = new ArrayList<>();
-        for (ConstructorItem item : node.getItems()) {
-            QueryResult q = visitConstructorQuery(new ConstructorQueryNode(item.getArticleName(), item.getKind(), item.getNumber()));
-            rows.addAll(q.getData());
-        }
-        return new QueryResult(deduplicate(rows), "Enumerated list query");
+        return new QueryResult(List.of(), "Enumerated constructor lists are no longer supported.");
     }
 
     private QueryResult evaluateOperation(QueryResult base, OperationNode operation) {
@@ -364,12 +620,17 @@ public class QueryEvaluationService {
 
         for (int i = 0; i < descendantPredicates.size(); i++) {
             int predicateIndex = i + 1;
-            sql.append("\n  and exists (")
+            NodePredicate predicate = descendantPredicates.get(i);
+            sql.append("\n  and ");
+            if (predicate.isNegated()) {
+                sql.append("not ");
+            }
+            sql.append("exists (")
                     .append("\n      select 1")
                     .append("\n      from item_node n").append(predicateIndex)
                     .append("\n      where n").append(predicateIndex).append(".item_id = n0.item_id")
                     .append("\n        and n").append(predicateIndex).append(".node_path like n0.node_path || '/%'");
-            appendNodePredicateCondition(sql, descendantPredicates.get(i), "n" + predicateIndex, predicateIndex);
+            appendNodePredicateCondition(sql, predicate, "n" + predicateIndex, predicateIndex);
             sql.append("\n  )");
         }
 
@@ -423,12 +684,13 @@ public class QueryEvaluationService {
         predicates.add(new PropositionPredicate(
                 "infix-term",
                 "absolutepatternmmlid",
-                first
+                first,
+                false
         ));
         if (second == null || second.isBlank() || "*".equals(second)) {
-            predicates.add(new PropositionPredicate("infix-term", null, null));
+            predicates.add(new PropositionPredicate("infix-term", null, null, false));
         } else {
-            predicates.add(new PropositionPredicate("infix-term", "absolutepatternmmlid", second));
+            predicates.add(new PropositionPredicate("infix-term", "absolutepatternmmlid", second, false));
         }
         return applyNodePredicates(base, "proposition", predicates, true, "Filtered by proposition infix pattern");
     }
@@ -454,7 +716,8 @@ public class QueryEvaluationService {
                 attr = null;
                 value = null;
             }
-            predicates.add(new PropositionPredicate(node, attr, value));
+            boolean negated = "1".equals(parts.get("neg" + i));
+            predicates.add(new PropositionPredicate(node, attr, value, negated));
         }
 
         boolean requireDistinctNodes = "proposition".equals(scope);
@@ -494,40 +757,98 @@ public class QueryEvaluationService {
             sql.append("\n  and substring(n0.node_path from '^(.*/Proposition\\[[0-9]+\\])') is not null");
         }
 
-        for (int i = 1; i < predicates.size(); i++) {
-            sql.append("\n  and exists (")
+        int anchorIndex = -1;
+        for (int i = 0; i < predicates.size(); i++) {
+            if (!predicates.get(i).negated()) {
+                anchorIndex = i;
+                break;
+            }
+        }
+        boolean syntheticAnchor = anchorIndex < 0;
+        if (syntheticAnchor) {
+            appendNodePredicateCondition(
+                    sql,
+                    new PropositionPredicate("*", null, null, false),
+                    "n0",
+                    0
+            );
+        } else {
+            appendNodePredicateCondition(sql, predicates.get(anchorIndex), "n0", 0);
+        }
+
+        int clauseIndex = 1;
+        for (int i = 0; i < predicates.size(); i++) {
+            if (!syntheticAnchor && i == anchorIndex) {
+                continue;
+            }
+            PropositionPredicate predicate = predicates.get(i);
+            sql.append("\n  and ");
+            if (predicate.negated()) {
+                sql.append("not ");
+            }
+            sql.append("exists (")
                     .append("\n      select 1")
                     .append("\n      from item_node n")
-                    .append(i)
-                    .append("\n      where n").append(i).append(".item_id = n0.item_id");
+                    .append(clauseIndex)
+                    .append("\n      where n").append(clauseIndex).append(".item_id = n0.item_id");
             if ("proposition".equals(scope)) {
-                sql.append("\n        and substring(n").append(i)
+                sql.append("\n        and substring(n").append(clauseIndex)
                         .append(".node_path from '^(.*/Proposition\\[[0-9]+\\])') = ")
                         .append("substring(n0.node_path from '^(.*/Proposition\\[[0-9]+\\])')");
             }
-            if (requireDistinctNodes) {
-                sql.append("\n        and n").append(i).append(".id <> n0.id");
+            if (requireDistinctNodes && !predicate.negated()) {
+                sql.append("\n        and n").append(clauseIndex).append(".id <> n0.id");
             }
 
-            appendNodePredicateCondition(sql, predicates.get(i), "n" + i, i);
+            appendNodePredicateCondition(sql, predicate, "n" + clauseIndex, clauseIndex);
             sql.append("\n  )");
+            clauseIndex++;
         }
 
         Map<String, Object> params = new LinkedHashMap<>();
         params.put("itemIdsCsv", toUuidCsv(itemIds));
 
-        for (int i = 0; i < predicates.size(); i++) {
-            PropositionPredicate predicate = predicates.get(i);
-            params.put("node" + i, normalizeLookupValue(predicate.nodeName()));
-            if (predicate.attributeName() != null && !predicate.attributeName().isBlank()) {
-                params.put("attr" + i, normalizeLookupValue(predicate.attributeName()));
-                if (predicate.attributeValue() != null) {
-                    params.put("value" + i, normalizeLookupValue(predicate.attributeValue()));
-                }
-            }
+        if (!syntheticAnchor) {
+            PropositionPredicate anchor = predicates.get(anchorIndex);
+            putNodePredicateParams(
+                    params,
+                    new NodePredicate(anchor.nodeName(), anchor.attributeName(), anchor.attributeValue(), anchor.negated()),
+                    0
+            );
         }
 
-        appendNodePredicateCondition(sql, predicates.get(0), "n0", 0);
+        int paramIndex = 1;
+        for (int i = 0; i < predicates.size(); i++) {
+            if (!syntheticAnchor && i == anchorIndex) {
+                continue;
+            }
+            PropositionPredicate predicate = predicates.get(i);
+            String normalizedNodeName = normalizeLookupValue(predicate.nodeName());
+            if (!isWildcardNode(normalizedNodeName)) {
+                if (isPatternLikeValue(normalizedNodeName)) {
+                    params.put("nodePattern" + paramIndex, toSqlLikePattern(normalizedNodeName));
+                } else {
+                    params.put("node" + paramIndex, unescapePatternLiterals(normalizedNodeName));
+                }
+            }
+            if (predicate.attributeName() != null && !predicate.attributeName().isBlank()) {
+                String normalizedAttrName = normalizeLookupValue(predicate.attributeName());
+                if (isPatternLikeValue(normalizedAttrName)) {
+                    params.put("attrPattern" + paramIndex, toSqlLikePattern(normalizedAttrName));
+                } else {
+                    params.put("attr" + paramIndex, unescapePatternLiterals(normalizedAttrName));
+                }
+                if (predicate.attributeValue() != null) {
+                    String normalizedAttrValue = normalizeLookupValue(predicate.attributeValue());
+                    if (isPatternLikeValue(normalizedAttrValue)) {
+                        params.put("valuePattern" + paramIndex, toSqlLikePattern(normalizedAttrValue));
+                    } else {
+                        params.put("value" + paramIndex, unescapePatternLiterals(normalizedAttrValue));
+                    }
+                }
+            }
+            paramIndex++;
+        }
 
         List<UUID> matchedIds = queryItemIds(sql.toString(), params);
         Set<UUID> matched = new HashSet<>(matchedIds);
@@ -550,7 +871,6 @@ public class QueryEvaluationService {
                        vi.subkind,
                        vi.text_content,
                        case
-                           when vi.kind = 'constructor' then 'constructors'
                            when vi.kind = 'statement' and vi.subkind = 'th' then 'theorems'
                            when vi.kind = 'statement' and vi.subkind in ('def', 'dfs') then 'definitions'
                            when vi.kind = 'statement' and vi.subkind = 'sch' then 'schemes'
@@ -604,6 +924,10 @@ public class QueryEvaluationService {
         Object nodeId = row.get("node_id");
         if (nodeId != null) {
             return "node:" + nodeId;
+        }
+        String spelling = safeToString(row.get("spelling"));
+        if (!spelling.isBlank()) {
+            return "spelling:" + normalizeLookupValue(spelling);
         }
         UUID itemId = asUuid(row.get("item_id"));
         if (itemId != null) {
@@ -694,9 +1018,15 @@ public class QueryEvaluationService {
             case "node_type", "node" -> safeToString(row.get("node_type"));
             case "text", "raw_text", "text_content" -> extractRawText(row);
             case "position", "text_position" -> safeToString(row.get("text_position"));
+            case "spelling" -> safeToString(row.get("spelling"));
+            case "occurrences", "count" -> safeToString(row.get("occurrences"));
             default -> "";
         };
-        return actual.equalsIgnoreCase(expected);
+        String normalizedExpected = normalizeLookupValue(expected);
+        if (isPatternLikeValue(normalizedExpected)) {
+            return matchesPattern(actual, normalizedExpected);
+        }
+        return actual.equalsIgnoreCase(unescapePatternLiterals(normalizedExpected));
     }
 
     private String rowText(Map<String, Object> row) {
@@ -706,6 +1036,8 @@ public class QueryEvaluationService {
                 + safeToString(row.get("subkind")) + " "
                 + safeToString(row.get("node_type")) + " "
                 + safeToString(row.get("text_position")) + " "
+                + safeToString(row.get("spelling")) + " "
+                + safeToString(row.get("occurrences")) + " "
                 + extractRawText(row)).toLowerCase(Locale.ROOT);
     }
 
@@ -713,6 +1045,10 @@ public class QueryEvaluationService {
         String rawText = safeToString(row.get("raw_text"));
         if (!rawText.isBlank()) {
             return rawText;
+        }
+        String spelling = safeToString(row.get("spelling"));
+        if (!spelling.isBlank()) {
+            return spelling;
         }
         return safeToString(row.get("text_content"));
     }
@@ -742,9 +1078,14 @@ public class QueryEvaluationService {
             String alias,
             int predicateIndex
     ) {
-        if (!isWildcardNode(predicate.getNodeName())) {
-            sql.append("\n    and lower(coalesce(").append(alias)
-                    .append(".details ->> 'tag', '')) = :node").append(predicateIndex);
+        String normalizedNodeName = normalizeLookupValue(predicate.getNodeName());
+        if (!isWildcardNode(normalizedNodeName)) {
+            sql.append("\n    and lower(coalesce(").append(alias).append(".details ->> 'tag', ''))");
+            if (isPatternLikeValue(normalizedNodeName)) {
+                sql.append(" like :nodePattern").append(predicateIndex).append(SQL_LIKE_ESCAPE_CLAUSE);
+            } else {
+                sql.append(" = :node").append(predicateIndex);
+            }
         }
 
         if (predicate.getAttributeName() != null && !predicate.getAttributeName().isBlank()) {
@@ -760,20 +1101,40 @@ public class QueryEvaluationService {
     ) {
         appendNodePredicateCondition(
                 sql,
-                new NodePredicate(predicate.nodeName(), predicate.attributeName(), predicate.attributeValue()),
+                new NodePredicate(
+                        predicate.nodeName(),
+                        predicate.attributeName(),
+                        predicate.attributeValue(),
+                        predicate.negated()
+                ),
                 alias,
                 predicateIndex
         );
     }
 
     private void putNodePredicateParams(Map<String, Object> params, NodePredicate predicate, int predicateIndex) {
-        if (!isWildcardNode(predicate.getNodeName())) {
-            params.put("node" + predicateIndex, normalizeLookupValue(predicate.getNodeName()));
+        String normalizedNodeName = normalizeLookupValue(predicate.getNodeName());
+        if (!isWildcardNode(normalizedNodeName)) {
+            if (isPatternLikeValue(normalizedNodeName)) {
+                params.put("nodePattern" + predicateIndex, toSqlLikePattern(normalizedNodeName));
+            } else {
+                params.put("node" + predicateIndex, unescapePatternLiterals(normalizedNodeName));
+            }
         }
         if (predicate.getAttributeName() != null && !predicate.getAttributeName().isBlank()) {
-            params.put("attr" + predicateIndex, normalizeLookupValue(predicate.getAttributeName()));
+            String normalizedAttrName = normalizeLookupValue(predicate.getAttributeName());
+            if (isPatternLikeValue(normalizedAttrName)) {
+                params.put("attrPattern" + predicateIndex, toSqlLikePattern(normalizedAttrName));
+            } else {
+                params.put("attr" + predicateIndex, unescapePatternLiterals(normalizedAttrName));
+            }
             if (predicate.getAttributeValue() != null) {
-                params.put("value" + predicateIndex, normalizeLookupValue(predicate.getAttributeValue()));
+                String normalizedAttrValue = normalizeLookupValue(predicate.getAttributeValue());
+                if (isPatternLikeValue(normalizedAttrValue)) {
+                    params.put("valuePattern" + predicateIndex, toSqlLikePattern(normalizedAttrValue));
+                } else {
+                    params.put("value" + predicateIndex, unescapePatternLiterals(normalizedAttrValue));
+                }
             }
         }
     }
@@ -795,6 +1156,8 @@ public class QueryEvaluationService {
                 return;
             }
 
+            String normalizedValue = normalizeLookupValue(predicate.getAttributeValue());
+            boolean patternValue = isPatternLikeValue(normalizedValue);
             sql.append("\n    and lower(coalesce(");
             for (int i = 0; i < keyCandidates.size(); i++) {
                 if (i > 0) {
@@ -805,21 +1168,39 @@ public class QueryEvaluationService {
                         .append(escapeSqlLiteral(keyCandidates.get(i)))
                         .append("'");
             }
-            sql.append(", '')) = :value").append(predicateIndex);
+            sql.append(", ''))");
+            if (patternValue) {
+                sql.append(" like :valuePattern").append(predicateIndex).append(SQL_LIKE_ESCAPE_CLAUSE);
+            } else {
+                sql.append(" = :value").append(predicateIndex);
+            }
             return;
         }
 
+        String normalizedAttrName = normalizeLookupValue(predicate.getAttributeName());
+        boolean patternAttrName = isPatternLikeValue(normalizedAttrName);
         sql.append("\n    and exists (")
                 .append("\n        select 1")
                 .append("\n        from jsonb_each_text(coalesce(").append(alias)
                 .append(".details -> 'attrs', '{}'::jsonb)) a").append(predicateIndex)
                 .append("(attr_key, attr_value)")
-                .append("\n        where lower(a").append(predicateIndex)
-                .append(".attr_key) = :attr").append(predicateIndex);
+                .append("\n        where lower(a").append(predicateIndex).append(".attr_key)");
+        if (patternAttrName) {
+            sql.append(" like :attrPattern").append(predicateIndex).append(SQL_LIKE_ESCAPE_CLAUSE);
+        } else {
+            sql.append(" = :attr").append(predicateIndex);
+        }
 
         if (predicate.getAttributeValue() != null) {
+            String normalizedAttrValue = normalizeLookupValue(predicate.getAttributeValue());
+            boolean patternAttrValue = isPatternLikeValue(normalizedAttrValue);
             sql.append("\n          and lower(coalesce(a").append(predicateIndex)
-                    .append(".attr_value, '')) = :value").append(predicateIndex);
+                    .append(".attr_value, ''))");
+            if (patternAttrValue) {
+                sql.append(" like :valuePattern").append(predicateIndex).append(SQL_LIKE_ESCAPE_CLAUSE);
+            } else {
+                sql.append(" = :value").append(predicateIndex);
+            }
         }
         sql.append("\n    )");
     }
@@ -870,6 +1251,140 @@ public class QueryEvaluationService {
         } catch (NumberFormatException ex) {
             throw new IllegalArgumentException(messageOnFailure);
         }
+    }
+
+    private boolean isPatternLikeValue(String raw) {
+        String normalized = normalizeLookupValue(raw);
+        if (normalized.isBlank()) {
+            return false;
+        }
+        boolean escaped = false;
+        for (int i = 0; i < normalized.length(); i++) {
+            char ch = normalized.charAt(i);
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (ch == '\\') {
+                escaped = true;
+                continue;
+            }
+            if (ch == '*' || ch == '_') {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private String toSqlLikeContainsPattern(String raw) {
+        return "%" + toSqlLikePattern(raw) + "%";
+    }
+
+    private String toSqlLikePattern(String raw) {
+        String normalized = normalizeLookupValue(raw);
+        StringBuilder sb = new StringBuilder(normalized.length() + 8);
+        boolean escaped = false;
+        for (int i = 0; i < normalized.length(); i++) {
+            char ch = normalized.charAt(i);
+            if (escaped) {
+                appendSqlLikeLiteral(sb, ch);
+                escaped = false;
+                continue;
+            }
+            if (ch == '\\') {
+                escaped = true;
+                continue;
+            }
+            if (ch == '*') {
+                sb.append('%');
+            } else if (ch == '_') {
+                sb.append('_');
+            } else {
+                appendSqlLikeLiteral(sb, ch);
+            }
+        }
+        if (escaped) {
+            appendSqlLikeLiteral(sb, '\\');
+        }
+        return sb.toString();
+    }
+
+    private String unescapePatternLiterals(String raw) {
+        String normalized = normalizeLookupValue(raw);
+        if (normalized.isBlank()) {
+            return normalized;
+        }
+        StringBuilder sb = new StringBuilder(normalized.length());
+        boolean escaped = false;
+        for (int i = 0; i < normalized.length(); i++) {
+            char ch = normalized.charAt(i);
+            if (escaped) {
+                if (ch == '*' || ch == '_' || ch == '\\' || ch == '%') {
+                    sb.append(ch);
+                } else {
+                    sb.append('\\').append(ch);
+                }
+                escaped = false;
+                continue;
+            }
+            if (ch == '\\') {
+                escaped = true;
+                continue;
+            }
+            sb.append(ch);
+        }
+        if (escaped) {
+            sb.append('\\');
+        }
+        return sb.toString();
+    }
+
+    private void appendSqlLikeLiteral(StringBuilder sb, char ch) {
+        if (ch == '%' || ch == '_' || ch == '\\') {
+            sb.append('\\');
+        }
+        sb.append(ch);
+    }
+
+    private boolean matchesPattern(String actualRaw, String patternRaw) {
+        String actual = normalizeLookupValue(actualRaw);
+        String pattern = normalizeLookupValue(patternRaw);
+        StringBuilder regex = new StringBuilder(pattern.length() * 2);
+        regex.append('^');
+        boolean escaped = false;
+        for (int i = 0; i < pattern.length(); i++) {
+            char ch = pattern.charAt(i);
+            if (escaped) {
+                appendRegexLiteral(regex, ch);
+                escaped = false;
+                continue;
+            }
+            if (ch == '\\') {
+                escaped = true;
+                continue;
+            }
+            if (ch == '*') {
+                regex.append(".*");
+            } else if (ch == '_') {
+                regex.append('.');
+            } else {
+                appendRegexLiteral(regex, ch);
+            }
+        }
+        if (escaped) {
+            appendRegexLiteral(regex, '\\');
+        }
+        regex.append('$');
+        return Pattern.compile(regex.toString(), Pattern.CASE_INSENSITIVE | Pattern.DOTALL)
+                .matcher(actual)
+                .matches();
+    }
+
+    private void appendRegexLiteral(StringBuilder regex, char ch) {
+        if ("\\.^$|?*+()[]{}".indexOf(ch) >= 0) {
+            regex.append('\\');
+        }
+        regex.append(ch);
     }
 
     private String decodeCriterionPart(String raw) {
@@ -954,8 +1469,46 @@ public class QueryEvaluationService {
             if (nodeXmlId != null) {
                 row.put("node_xmlid", nodeXmlId);
             }
+            Object spelling = safeGet(rs, "spelling");
+            if (spelling != null) {
+                row.put("spelling", spelling);
+            }
+            Object occurrences = safeGet(rs, "occurrences");
+            if (occurrences != null) {
+                row.put("occurrences", occurrences);
+            }
             return row;
         }).list();
+    }
+
+    private List<Map<String, Object>> queryGenericRows(String sql, Map<String, Object> params) {
+        JdbcClient.StatementSpec spec = jdbcClient.sql(sql);
+        for (Map.Entry<String, Object> entry : params.entrySet()) {
+            spec = spec.param(entry.getKey(), entry.getValue());
+        }
+        return spec.query((rs, rowNum) -> {
+            java.sql.ResultSetMetaData metaData = rs.getMetaData();
+            int columnCount = metaData.getColumnCount();
+            Map<String, Object> row = new LinkedHashMap<>();
+            for (int i = 1; i <= columnCount; i++) {
+                String key = metaData.getColumnLabel(i);
+                if (key == null || key.isBlank()) {
+                    key = metaData.getColumnName(i);
+                }
+                row.put(key, rs.getObject(i));
+            }
+            return row;
+        }).list();
+    }
+
+    private int queryCount(String sql, Map<String, Object> params) {
+        JdbcClient.StatementSpec spec = jdbcClient.sql(sql);
+        for (Map.Entry<String, Object> entry : params.entrySet()) {
+            spec = spec.param(entry.getKey(), entry.getValue());
+        }
+        return spec.query((rs, rowNum) -> rs.getInt(1))
+                .optional()
+                .orElse(0);
     }
 
     private List<UUID> queryItemIds(String sql, Map<String, Object> params) {
@@ -981,7 +1534,39 @@ public class QueryEvaluationService {
         }
     }
 
-    private record PropositionPredicate(String nodeName, String attributeName, String attributeValue) {
+    private record PropositionPredicate(
+            String nodeName,
+            String attributeName,
+            String attributeValue,
+            boolean negated
+    ) {
+    }
+
+    private record PagedListPlan(
+            ListType listType,
+            String baseSql,
+            Map<String, Object> params,
+            boolean genericRows
+    ) {
+    }
+
+    private record SortResolution(
+            String orderClause,
+            String sortByKey,
+            String sortDirection
+    ) {
+    }
+
+    public record PagedListQueryResult(
+            List<Map<String, Object>> data,
+            int totalCount,
+            String description,
+            int page,
+            int size,
+            String sortBy,
+            String sortDirection,
+            String filter
+    ) {
     }
 
     @Data

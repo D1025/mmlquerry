@@ -17,8 +17,6 @@ public class AstJsonSerializer {
         ObjectNode root = JsonNodeFactory.instance.objectNode();
         if (query instanceof ListQueryNode) {
             return visitListQuery((ListQueryNode) query);
-        } else if (query instanceof ConstructorQueryNode) {
-            return visitConstructorQuery((ConstructorQueryNode) query);
         } else if (query instanceof ArticleQueryNode) {
             return visitArticleQuery((ArticleQueryNode) query);
         } else if (query instanceof GroupQueryNode) {
@@ -64,15 +62,9 @@ public class AstJsonSerializer {
         if (node.getSource() != null) {
             obj.set("source", serializeQuerySource(node.getSource()));
         }
-        return obj;
-    }
-
-    private ObjectNode visitConstructorQuery(ConstructorQueryNode node) {
-        ObjectNode obj = JsonNodeFactory.instance.objectNode();
-        obj.put("type", "ConstructorQuery");
-        obj.put("article", node.getArticleName());
-        obj.put("kind", node.getKind());
-        obj.put("number", node.getNumber());
+        if (node.getSymbolSpellingFilter() != null && !node.getSymbolSpellingFilter().isBlank()) {
+            obj.put("symbolSpellingFilter", node.getSymbolSpellingFilter());
+        }
         return obj;
     }
 
@@ -178,6 +170,9 @@ public class AstJsonSerializer {
         }
         if (predicate.getAttributeValue() != null) {
             obj.put("attributeValue", predicate.getAttributeValue());
+        }
+        if (predicate.isNegated()) {
+            obj.put("negated", true);
         }
         return obj;
     }

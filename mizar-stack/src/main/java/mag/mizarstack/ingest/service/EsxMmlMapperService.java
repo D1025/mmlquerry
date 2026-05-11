@@ -161,6 +161,7 @@ public class EsxMmlMapperService {
         int mappedFileOrdinal = mappedFileCounter.incrementAndGet();
         var parsedItems = new AtomicInteger(0);
         var failedItems = new AtomicInteger(0);
+        var itemSequence = new AtomicInteger(0);
         FileInsertStats insertStats = new FileInsertStats();
 
         // libId -> mml_item.id
@@ -205,7 +206,7 @@ public class EsxMmlMapperService {
             // Streaming SAX ingestion that is namespace/case safe.
             // We extract each <Item> subtree as XML and map it to DB.
             ingestItemsSax(xmlBytes, s3Key, currentArticleId, currentArticleName,
-                    parsedItems, failedItems, libIdToItem, pendingRelations, symbolCache, formatCache, insertStats, m);
+                    parsedItems, failedItems, itemSequence, libIdToItem, pendingRelations, symbolCache, formatCache, insertStats, m);
 
             if (parsedItems.get() == 0) {
                 detectLikelyItemElements(xmlBytes, m);
@@ -287,6 +288,7 @@ public class EsxMmlMapperService {
             AtomicReference<String> currentArticleName,
             AtomicInteger parsedItems,
             AtomicInteger failedItems,
+            AtomicInteger itemSequence,
             Map<String, UUID> libIdToItem,
             List<PendingRelation> pendingRelations,
             Map<String, UUID> symbolCache,
@@ -385,11 +387,13 @@ public class EsxMmlMapperService {
                             final String itemXmlSnapshot = itemXml.toString();
                             final UUID articleIdSnapshot = currentArticleId.get();
                             final String articleNameSnapshot = currentArticleName.get();
+                            final int itemSequenceSnapshot = itemSequence.incrementAndGet();
 
                             Runnable task = () -> processItemSubtree(
                                     itemXmlSnapshot,
                                     xmlBytes,
                                     s3Key,
+                                    itemSequenceSnapshot,
                                     articleIdSnapshot,
                                     articleNameSnapshot,
                                     currentArticleId,
@@ -455,6 +459,7 @@ public class EsxMmlMapperService {
             String itemXml,
             byte[] xmlBytes,
             String s3Key,
+            int itemSequence,
             UUID articleIdHint,
             String articleNameHint,
             AtomicReference<UUID> currentArticleId,
@@ -492,7 +497,7 @@ public class EsxMmlMapperService {
                         currentArticleName.compareAndSet(null, articleName);
                     }
 
-                    MappedMmlItem statementItem = extractItem(itemEl, articleName);
+                    MappedMmlItem statementItem = extractItem(itemEl, articleName, itemSequence);
                     UUID statementItemId = upsertMmlItem(articleId, statementItem, insertStats);
 
                     if (statementItem.libId != null && !statementItem.libId.isBlank()) {
@@ -518,11 +523,6 @@ public class EsxMmlMapperService {
                             formatCache,
                             insertStats
                     );
-
-                    List<String> references = findConstructorLibIds(itemEl);
-                    for (String rlib : references) {
-                        pendingRelations.add(PendingRelation.itemConstructorRef(statementItemId, rlib, "ref", true, 1, null));
-                    }
 
                     String itemKind = Optional.ofNullable(itemEl.attributeValue("kind")).orElse("");
                     if (isDefinitionItemKind(itemKind)) {
@@ -932,24 +932,9 @@ public class EsxMmlMapperService {
         }
 
         for (Element definitionEl : concreteDefinitions) {
-            String constructorKind = constructorKindFromDefinitionName(definitionEl.getName());
-            String constructorLibId = extractDefinitionConstructorLibId(definitionEl, articleName);
-
-            if (constructorKind != null && constructorLibId != null && !constructorLibId.isBlank()) {
-                MappedMmlItem constructorItem = buildSpecializedItem(definitionEl, "constructor", constructorKind, constructorLibId, articleName);
-                UUID constructorItemId = upsertMmlItem(articleId, constructorItem, insertStats);
-                insertConstructor(constructorItemId, constructorKind, constructorItem.shortName, insertStats);
-                libIdToItem.put(constructorLibId, constructorItemId);
-
-                if (definitionEl.selectSingleNode("./Definiens") != null || definitionEl.selectSingleNode(".//Definiens") != null) {
-                    pendingRelations.add(PendingRelation.constructorDefinition(statementItemId, constructorLibId));
-                    pendingRelations.add(PendingRelation.constructorDefiniens(statementItemId, constructorLibId));
-                }
-            }
-
             List<Element> patternElements = findNotationPatternElements(definitionEl);
             for (Element patternEl : patternElements) {
-                processNotationPattern(patternEl, articleId, articleName, constructorLibId, libIdToItem, pendingRelations, symbolCache, formatCache, insertStats);
+                processNotationPattern(patternEl, articleId, articleName, null, libIdToItem, pendingRelations, symbolCache, formatCache, insertStats);
             }
         }
     }
@@ -992,15 +977,6 @@ public class EsxMmlMapperService {
                     insertStats
             );
 
-            List<org.dom4j.Node> refNodes = registrationEl.selectNodes(".//*[@absoluteconstrMMLId]");
-            for (org.dom4j.Node n : refNodes) {
-                if (!(n instanceof Element refEl)) continue;
-                String constructorLibId = refEl.attributeValue("absoluteconstrMMLId");
-                if (constructorLibId == null || constructorLibId.isBlank()) continue;
-                String role = deriveRegistrationRole(refEl);
-                boolean isPositive = !isNegativeReference(refEl);
-                pendingRelations.add(PendingRelation.registrationRelation(registrationItemId, constructorLibId, role, isPositive));
-            }
         }
     }
 
@@ -1240,7 +1216,7 @@ public class EsxMmlMapperService {
 
     // -------------------- Extraction --------------------
 
-    private MappedMmlItem extractItem(Element itemEl, String articleName) {
+    private MappedMmlItem extractItem(Element itemEl, String articleName, int itemSequence) {
         MappedMmlItem it = new MappedMmlItem();
         it.kind = guessItemKind(itemEl);
 
@@ -1255,7 +1231,7 @@ public class EsxMmlMapperService {
         it.title = findTitle(itemEl);
         it.textContent = extractTextContent(itemEl);
         it.rawXml = itemEl.asXML();
-        it.number = findNumber(itemEl);
+        it.number = findNumber(itemEl, itemSequence);
         return it;
     }
 
@@ -1266,6 +1242,10 @@ public class EsxMmlMapperService {
      * - Fallback: parse xmlid like "x123" -> 123 (very stable within file)
      */
     private int findNumber(Element itemEl) {
+        return findNumber(itemEl, 0);
+    }
+
+    private int findNumber(Element itemEl, int itemSequence) {
         String nr = itemEl.attributeValue("nr");
         if (nr == null) nr = itemEl.attributeValue("number");
         if (nr != null) {
@@ -1305,6 +1285,9 @@ public class EsxMmlMapperService {
             }
         }
 
+        if (itemSequence > 0) {
+            return 2_000_000 + itemSequence;
+        }
         return 0;
     }
 
@@ -1564,28 +1547,7 @@ public class EsxMmlMapperService {
             }
         }
 
-        Set<String> constructorLibIds = new LinkedHashSet<>();
-        if (looksLikeLibId(fallbackConstructorLibId)) {
-            constructorLibIds.add(fallbackConstructorLibId);
-        }
-        String ownConstructorLib = patternEl.attributeValue("absoluteconstrMMLId");
-        if (looksLikeLibId(ownConstructorLib)) {
-            constructorLibIds.add(ownConstructorLib);
-        }
-        List<org.dom4j.Node> constrNodes = patternEl.selectNodes(".//*[@absoluteconstrMMLId]");
-        for (org.dom4j.Node n : constrNodes) {
-            if (!(n instanceof Element e)) continue;
-            String lib = e.attributeValue("absoluteconstrMMLId");
-            if (looksLikeLibId(lib)) constructorLibIds.add(lib);
-        }
-
-        for (String constructorLibId : constructorLibIds) {
-            pendingRelations.add(PendingRelation.notationConstructor(notationItemId, constructorLibId, "denotes"));
-            UUID known = libIdToItem.get(constructorLibId);
-            if (known != null) {
-                insertNotationConstructor(notationItemId, known, "denotes", insertStats);
-            }
-        }
+        // Constructor-level links are intentionally disabled: query language and storage no longer expose constructor view/data.
     }
 
     private List<String> extractNotationSymbols(Element patternEl) {
@@ -1659,7 +1621,6 @@ public class EsxMmlMapperService {
             FileInsertStats insertStats
     ) {
         UUID nodeId = UUID.randomUUID();
-        String constructorLibId = extractConstructorLibIdFromNode(nodeEl);
         UUID constructorItemId = null;
         UUID symbolId = resolveSymbolIdForNode(nodeEl, articleId, symbolCache, insertStats);
         UUID formatId = resolveFormatIdForNode(nodeEl, articleId, formatCache, insertStats);
@@ -1676,13 +1637,9 @@ public class EsxMmlMapperService {
                 pos,
                 depth,
                 abbreviateRawXml(nodeEl),
-                collectNodeDetails(nodeEl, constructorLibId),
+                collectNodeDetails(nodeEl),
                 insertStats
         );
-
-        if (constructorLibId != null && !constructorLibId.isBlank()) {
-            pendingRelations.add(PendingRelation.itemNodeConstructor(nodeId, constructorLibId));
-        }
 
         int childPos = 1;
         for (Iterator<?> it = nodeEl.elementIterator(); it.hasNext(); ) {
@@ -1717,13 +1674,21 @@ public class EsxMmlMapperService {
             return null;
         }
         String nodeName = nodeEl.getName();
-        if (nodeName == null || !nodeName.toLowerCase(Locale.ROOT).contains("symbol")) {
+        if (nodeName == null) {
             return null;
         }
+        String normalizedNodeName = nodeName.toLowerCase(Locale.ROOT);
+        boolean symbolNode = normalizedNodeName.contains("symbol");
+        boolean patternNode = normalizedNodeName.endsWith("-pattern");
+
+        if (!symbolNode && !patternNode) {
+            return null;
+        }
+
         String symbolText = firstNonBlank(
                 nodeEl.attributeValue("spelling"),
-                nodeEl.attributeValue("name"),
-                nodeEl.getTextTrim()
+                symbolNode ? nodeEl.attributeValue("name") : null,
+                symbolNode ? nodeEl.getTextTrim() : null
         );
         if (symbolText == null || symbolText.isBlank()) {
             return null;
@@ -1798,15 +1763,7 @@ public class EsxMmlMapperService {
         return nodeEl.getName().toLowerCase(Locale.ROOT).contains("symbol");
     }
 
-    private String extractConstructorLibIdFromNode(Element nodeEl) {
-        String constructorLibId = nodeEl.attributeValue("absoluteconstrMMLId");
-        if ((constructorLibId == null || constructorLibId.isBlank()) && looksLikeLibId(nodeEl.attributeValue("constr"))) {
-            constructorLibId = nodeEl.attributeValue("constr");
-        }
-        return (constructorLibId == null || constructorLibId.isBlank()) ? null : constructorLibId;
-    }
-
-    private Map<String, Object> collectNodeDetails(Element nodeEl, String constructorLibId) {
+    private Map<String, Object> collectNodeDetails(Element nodeEl) {
         Map<String, Object> details = new LinkedHashMap<>();
         details.put("tag", nodeEl.getName());
 
@@ -1818,9 +1775,6 @@ public class EsxMmlMapperService {
         }
         if (!attrs.isEmpty()) {
             details.put("attrs", attrs);
-        }
-        if (constructorLibId != null) {
-            details.put("constructorLibId", constructorLibId);
         }
         return details;
     }

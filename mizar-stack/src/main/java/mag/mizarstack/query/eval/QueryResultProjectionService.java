@@ -22,12 +22,21 @@ public class QueryResultProjectionService {
             return List.of();
         }
 
-        Map<UUID, RootNodeContext> rootContextByItemId = loadRootNodeContext(rows);
-        Map<UUID, String> rawXmlByItemId = loadItemRawXmlForNodeRows(rows);
+        List<Map<String, Object>> entityRows = rows.stream()
+                .filter(this::isEntityRow)
+                .toList();
+
+        Map<UUID, RootNodeContext> rootContextByItemId = loadRootNodeContext(entityRows);
+        Map<UUID, String> rawXmlByItemId = loadItemRawXmlForNodeRows(entityRows);
         Map<UUID, Optional<Document>> documentByItemId = new HashMap<>();
         List<Map<String, Object>> projected = new ArrayList<>(rows.size());
 
         for (Map<String, Object> row : rows) {
+            if (!isEntityRow(row)) {
+                projected.add(projectGenericRow(row));
+                continue;
+            }
+
             UUID itemId = asUuid(row.get("item_id"));
             String rawText = resolveRawText(row, itemId, rootContextByItemId, rawXmlByItemId, documentByItemId);
 
@@ -39,10 +48,44 @@ public class QueryResultProjectionService {
             item.put("article_name", safeToString(row.get("article_name")));
             item.put("node_type", safeToString(row.get("node_type")));
             item.put("text_position", resolveTextPosition(row, itemId, rootContextByItemId));
+            if (row.containsKey("spelling")) {
+                item.put("spelling", safeToString(row.get("spelling")));
+            }
+            if (row.containsKey("occurrences")) {
+                item.put("occurrences", row.get("occurrences"));
+            }
             item.put("raw", rawText);
             projected.add(item);
         }
 
+        return projected;
+    }
+
+    private boolean isEntityRow(Map<String, Object> row) {
+        if (row == null || row.isEmpty()) {
+            return false;
+        }
+        return row.containsKey("item_id")
+                || row.containsKey("node_id")
+                || row.containsKey("node_path")
+                || row.containsKey("node_xmlid")
+                || row.containsKey("lib_id")
+                || row.containsKey("article_name")
+                || row.containsKey("node_type")
+                || row.containsKey("raw_text")
+                || row.containsKey("text_content");
+    }
+
+    private Map<String, Object> projectGenericRow(Map<String, Object> row) {
+        Map<String, Object> projected = new LinkedHashMap<>();
+        for (Map.Entry<String, Object> entry : row.entrySet()) {
+            Object value = entry.getValue();
+            if (value instanceof UUID uuid) {
+                projected.put(entry.getKey(), uuid.toString());
+            } else {
+                projected.put(entry.getKey(), value);
+            }
+        }
         return projected;
     }
 

@@ -381,7 +381,7 @@ public class IngestService {
     }
 
     /**
-     * Parse ESX XML and map to mizar_schema tables (article, mml_item, constructor, notation, etc.)
+     * Parse ESX XML and map to mizar_schema tables (article, mml_item, statement/notation/registration, item_node, etc.)
      */
     private void parseAndMapToMizarSchema(byte[] body, String s3Key, int currentFile, int totalFiles) {
         Instant mapStart = Instant.now();
@@ -493,11 +493,9 @@ public class IngestService {
     }
 
     private static String formatItemNodeLinkCounts(Map<String, Long> counts) {
-        long constructorLinks = metric(counts, FileInsertStats.ITEM_NODE_WITH_CONSTRUCTOR);
         long symbolLinks = metric(counts, FileInsertStats.ITEM_NODE_WITH_SYMBOL);
         long formatLinks = metric(counts, FileInsertStats.ITEM_NODE_WITH_FORMAT);
-        return "constructor_item_id=" + constructorLinks
-                + ", symbol_id=" + symbolLinks
+        return "symbol_id=" + symbolLinks
                 + ", format_id=" + formatLinks;
     }
 

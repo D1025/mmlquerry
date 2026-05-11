@@ -94,7 +94,7 @@ public class IngestController {
      * 4. Index all .esx files from mizar-esx/releases/{tagName}/esx_mml/ into PostgreSQL mizar_schema
      *
      * Structure created:
-     *   mizar-esx/releases/{tagName}/esx_mml/{article}.esx  -> Article table + mml_item + constructor + ...
+     *   mizar-esx/releases/{tagName}/esx_mml/{article}.esx  -> Article table + mml_item + statement/notation/registration + item_node + ...
      *
      * POST /ingest/full
      * 

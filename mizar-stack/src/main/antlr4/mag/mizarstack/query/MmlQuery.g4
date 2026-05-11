@@ -29,7 +29,6 @@ atomExpression
     : LPAREN expression RPAREN
     | theoremInfixExpression
     | listExpression
-    | constructorExpression
     | articleExpression
     ;
 
@@ -38,7 +37,8 @@ theoremInfixExpression
     ;
 
 scopedPredicate
-    : scopeName HAS nodeName (LBRACK attributeName EQ stringLiteral RBRACK)?
+    : scopeName HAS NOT? nodeName predicateAttribute?
+    | scopeName NOT HAS nodeName predicateAttribute?
     ;
 
 scopeName
@@ -51,6 +51,7 @@ nodeName
     | ARTICLE_NAME
     | ITEM
     | PROPOSITION
+    | SPELLING
     | STAR
     | stringLiteral
     ;
@@ -58,20 +59,41 @@ nodeName
 attributeName
     : NODE_NAME
     | ARTICLE_NAME
+    | SPELLING
     | OCCUR
     | stringLiteral
     ;
 
+predicateAttribute
+    : LBRACK attributeName EQ stringLiteral RBRACK
+    | spellingClause
+    | NOT spellingClause
+    ;
+
+spellingClause
+    : SPELLING EQ? predicateValue
+    ;
+
+predicateValue
+    : stringLiteral
+    | nodeName
+    ;
+
 listExpression
-    : LIST OF listType (IN listSource)?
+    : LIST OF listType (IN listSource)? symbolWhereClause?
+    | OCCURRENCES OF SYMBOL (IN listSource)?
+    ;
+
+symbolWhereClause
+    : WHERE spellingClause
     ;
 
 listType
-    : CONSTRUCTOR
-    | THEOREM
+    : THEOREM
     | DEFINITION
     | STATEMENT
     | REGISTRATION
+    | SYMBOL
     | ALL
     ;
 
@@ -80,26 +102,8 @@ listSource
     | STAR
     ;
 
-constructorExpression
-    : ARTICLE_NAME COLON itemKind NUMBER
-    ;
-
 articleExpression
     : ARTICLE ARTICLE_NAME
-    ;
-
-itemKind
-    : FUNC
-    | PRED
-    | ATTR
-    | MODE
-    | SEL
-    | AGGR
-    | STRUCT
-    | TH
-    | DEF
-    | DFS
-    | SCH
     ;
 
 operationExpression
@@ -127,16 +131,25 @@ nodeSelector
     ;
 
 nodePredicate
-    : HAS nodeName (LBRACK attributeName EQ stringLiteral RBRACK)?
+    : HAS NOT? nodeName predicateAttribute?
+    | NOT HAS nodeName predicateAttribute?
     ;
 
 nodeWherePredicate
-    : nodePredicate
+    : NOT nodePredicate
+    | NOT spellingPredicate
+    | NOT redefinePredicate
+    | nodePredicate
+    | spellingPredicate
     | redefinePredicate
     ;
 
 redefinePredicate
     : nodeName nodeName?
+    ;
+
+spellingPredicate
+    : spellingClause
     ;
 
 cardinalityOperation
@@ -182,11 +195,11 @@ LBRACK: '[';
 RBRACK: ']';
 EQ: '=';
 
-CONSTRUCTOR: C O N S T R U C T O R S?;
 THEOREM: T H E O R E M S?;
 DEFINITION: D E F I N I T I O N S?;
 STATEMENT: S T A T E M E N T S?;
 REGISTRATION: R E G I S T R A T I O N S?;
+SYMBOL: S Y M B O L S?;
 ALL: A L L;
 
 REF: R E F;
@@ -195,13 +208,16 @@ NOTATION: N O T A T I O N;
 REDEF: R E D E F | R E D E F I N I T I O N;
 ORIGIN: O R I G I N | O R I G I N A L;
 COPY: C O P Y | C O P I E D;
+OCCURRENCES: O C C U R R E N C E S;
 TERMTYPE: T E R M T Y P E;
 DEFTYPE: D E F T Y P E;
 MAIN: M A I N;
+MODE: M O D E;
 FUNCTOR: F U N C T O R;
 FILTER: F I L T E R;
 GREP: G R E P;
 NODES: N O D E S?;
+SPELLING: S P E L L I N G;
 REVERSE: R E V E R S E;
 INVERT: I N V E R T;
 WHEREEQ: W H E R E E Q;
@@ -209,18 +225,6 @@ WHEREGE: W H E R E G E;
 WHERELE: W H E R E L E;
 WHEREGT: W H E R E G T;
 WHERELT: W H E R E L T;
-
-FUNC: F U N C;
-PRED: P R E D;
-ATTR: A T T R;
-MODE: M O D E;
-SEL: S E L;
-AGGR: A G G R;
-STRUCT: S T R U C T;
-TH: T H;
-DEF: D E F;
-DFS: D F S;
-SCH: S C H;
 
 ARTICLE_NAME: [A-Z] [A-Z0-9_]*;
 NODE_NAME: [a-zA-Z] [a-zA-Z0-9_]* ('-' [a-zA-Z0-9_]+)*;

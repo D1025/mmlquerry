@@ -11,8 +11,23 @@ export interface ExecuteQueryResponse {
   ast: unknown
   description: string
   count: number
+  page?: number
+  size?: number
+  sortBy?: string | null
+  sortDirection?: 'asc' | 'desc' | string | null
+  filter?: string | null
+  returnedCount?: number
   items: QueryItem[]
   timing?: QueryTiming
+}
+
+export interface ExecuteQueryRequest {
+  query: string
+  page?: number
+  size?: number
+  sortBy?: string
+  sortDirection?: 'asc' | 'desc'
+  filter?: string
 }
 
 export interface QueryTiming {
@@ -23,14 +38,17 @@ export interface QueryTiming {
 }
 
 export interface QueryItem {
-  item_id: string
+  [key: string]: string | number | boolean | null | undefined
+  item_id?: string
   node_id?: string
   node_path?: string
-  lib_id: string
-  article_name: string
-  node_type: string
-  text_position: string
-  raw: string
+  lib_id?: string
+  article_name?: string
+  node_type?: string
+  text_position?: string
+  raw?: string
+  spelling?: string
+  occurrences?: number
 }
 
 export interface ItemFragmentResponse {
@@ -70,13 +88,13 @@ export async function getSyntax(): Promise<SyntaxResponse> {
   return parseResponse<SyntaxResponse>(response)
 }
 
-export async function executeQuery(query: string): Promise<ExecuteQueryResponse> {
+export async function executeQuery(request: ExecuteQueryRequest): Promise<ExecuteQueryResponse> {
   const response = await fetch(`${API_BASE_URL}/query/execute`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ query }),
+    body: JSON.stringify(request),
   })
 
   return parseResponse<ExecuteQueryResponse>(response)

@@ -55,7 +55,7 @@ public class QueryWarmupService {
                         query,
                         true,
                         null,
-                        outcome.projectedCount(),
+                        outcome.totalCount(),
                         metrics.parseMs(),
                         metrics.executeMs(),
                         metrics.projectionMs(),

@@ -2,6 +2,7 @@ import { createAsyncThunk, createSlice, type PayloadAction } from '@reduxjs/tool
 import {
   executeQuery,
   getSyntax,
+  type ExecuteQueryRequest,
   type ExecuteQueryResponse,
   type SyntaxResponse,
 } from './queryApi'
@@ -29,8 +30,8 @@ const initialState: QueryState = {
 
 export const fetchSyntax = createAsyncThunk('query/fetchSyntax', async () => getSyntax())
 
-export const runQuery = createAsyncThunk('query/runQuery', async (query: string) =>
-  executeQuery(query),
+export const runQuery = createAsyncThunk('query/runQuery', async (request: ExecuteQueryRequest) =>
+  executeQuery(request),
 )
 
 const querySlice = createSlice({
@@ -39,6 +40,15 @@ const querySlice = createSlice({
   reducers: {
     setQueryText: (state, action: PayloadAction<string>) => {
       state.queryText = action.payload
+      if (state.executeStatus === 'failed') {
+        state.executeStatus = 'idle'
+      }
+      state.executeError = null
+    },
+    setQueryResult: (state, action: PayloadAction<ExecuteQueryResponse>) => {
+      state.executeStatus = 'succeeded'
+      state.executeError = null
+      state.result = action.payload
     },
   },
   extraReducers: (builder) => {
@@ -70,5 +80,5 @@ const querySlice = createSlice({
   },
 })
 
-export const { setQueryText } = querySlice.actions
+export const { setQueryText, setQueryResult } = querySlice.actions
 export default querySlice.reducer

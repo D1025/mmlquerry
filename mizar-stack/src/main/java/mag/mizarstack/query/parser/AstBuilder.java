@@ -4,6 +4,7 @@ import mag.mizarstack.query.MmlQueryBaseVisitor;
 import mag.mizarstack.query.MmlQueryParser;
 import mag.mizarstack.query.ast.*;
 import org.antlr.v4.runtime.Token;
+import org.antlr.v4.runtime.tree.ParseTree;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -77,9 +78,6 @@ public class AstBuilder extends MmlQueryBaseVisitor<Object> {
         if (ctx.listExpression() != null) {
             return visit(ctx.listExpression());
         }
-        if (ctx.constructorExpression() != null) {
-            return visit(ctx.constructorExpression());
-        }
         if (ctx.articleExpression() != null) {
             return visit(ctx.articleExpression());
         }
@@ -107,18 +105,27 @@ public class AstBuilder extends MmlQueryBaseVisitor<Object> {
 
     @Override
     public Object visitListExpression(MmlQueryParser.ListExpressionContext ctx) {
-        ListType listType = parseListType(ctx.listType().getText());
+        ListType listType;
+        if (ctx.listType() != null) {
+            listType = parseListType(ctx.listType().getText());
+        } else if (ctx.OCCURRENCES() != null) {
+            listType = ListType.SYMBOL_OCCURRENCES;
+        } else {
+            throw new IllegalArgumentException("Unsupported list expression: " + ctx.getText());
+        }
         QuerySource source = new QuerySource(ctx.listSource() == null ? "*" : ctx.listSource().getText());
-        return new ListQueryNode(listType, source);
-    }
 
-    @Override
-    public Object visitConstructorExpression(MmlQueryParser.ConstructorExpressionContext ctx) {
-        return new ConstructorQueryNode(
-                ctx.ARTICLE_NAME().getText(),
-                ctx.itemKind().getText().toLowerCase(Locale.ROOT),
-                Integer.parseInt(ctx.NUMBER().getText())
-        );
+        if (ctx.symbolWhereClause() != null) {
+            if (listType != ListType.SYMBOLS) {
+                throw new IllegalArgumentException(
+                        "WHERE spelling is supported only for \"list of symbols\"."
+                );
+            }
+            PredicateAttributeData spellingData = extractSpellingClause(ctx.symbolWhereClause().spellingClause());
+            return new ListQueryNode(listType, source, spellingData.attributeValue());
+        }
+
+        return new ListQueryNode(listType, source);
     }
 
     @Override
@@ -254,11 +261,11 @@ public class AstBuilder extends MmlQueryBaseVisitor<Object> {
     private ListType parseListType(String text) {
         String normalized = text.toLowerCase(Locale.ROOT);
         return switch (normalized) {
-            case "constructor", "constructors" -> ListType.CONSTRUCTORS;
             case "theorem", "theorems" -> ListType.THEOREMS;
             case "definition", "definitions" -> ListType.DEFINITIONS;
             case "statement", "statements" -> ListType.STATEMENTS;
             case "registration", "registrations" -> ListType.REGISTRATIONS;
+            case "symbol", "symbols" -> ListType.SYMBOLS;
             case "all" -> ListType.ALL;
             default -> throw new IllegalArgumentException("Unsupported list type: " + text);
         };
@@ -288,16 +295,16 @@ public class AstBuilder extends MmlQueryBaseVisitor<Object> {
             throw new IllegalArgumentException("Node name in scoped predicate cannot be blank.");
         }
 
-        if (predicateContext.stringLiteral() == null) {
-            return new ScopedPredicate(scope, nodeName, null, null);
+        boolean predicateNegated = hasNegationAroundHas(predicateContext);
+        PredicateAttributeData attributeData = extractPredicateAttribute(predicateContext.predicateAttribute());
+        boolean negated = predicateNegated;
+        if (attributeData != null && attributeData.negated()) {
+            negated = !negated;
         }
-
-        String attributeName = normalizeAttributeName(readIdentifierText(predicateContext.attributeName().getText()));
-        if (attributeName.isBlank()) {
-            throw new IllegalArgumentException("Attribute name in scoped predicate cannot be blank.");
+        if (attributeData == null) {
+            return new ScopedPredicate(scope, nodeName, null, null, negated);
         }
-        String attributeValue = parseStringLiteral(predicateContext.stringLiteral().getText());
-        return new ScopedPredicate(scope, nodeName, attributeName, attributeValue);
+        return new ScopedPredicate(scope, nodeName, attributeData.attributeName(), attributeData.attributeValue(), negated);
     }
 
     private NodePredicate extractNodeSelector(MmlQueryParser.NodeSelectorContext selectorContext) {
@@ -324,23 +331,44 @@ public class AstBuilder extends MmlQueryBaseVisitor<Object> {
             throw new IllegalArgumentException("Node predicate cannot be blank.");
         }
 
-        if (predicateContext.stringLiteral() == null) {
-            return new NodePredicate(nodeName, null, null);
+        boolean predicateNegated = hasNegationAroundHas(predicateContext);
+        PredicateAttributeData attributeData = extractPredicateAttribute(predicateContext.predicateAttribute());
+        boolean negated = predicateNegated;
+        if (attributeData != null && attributeData.negated()) {
+            negated = !negated;
         }
-
-        String attributeName = normalizeAttributeName(readIdentifierText(predicateContext.attributeName().getText()));
-        if (attributeName.isBlank()) {
-            throw new IllegalArgumentException("Node predicate attribute name cannot be blank.");
+        if (attributeData == null) {
+            return new NodePredicate(nodeName, null, null, negated);
         }
-        String attributeValue = parseStringLiteral(predicateContext.stringLiteral().getText());
-        return new NodePredicate(nodeName, attributeName, attributeValue);
+        return new NodePredicate(nodeName, attributeData.attributeName(), attributeData.attributeValue(), negated);
     }
 
     private NodePredicate extractNodeWherePredicate(MmlQueryParser.NodeWherePredicateContext predicateContext) {
+        boolean prefixedNegation = predicateContext.getChildCount() > 0
+                && "not".equalsIgnoreCase(predicateContext.getChild(0).getText());
         if (predicateContext.nodePredicate() != null) {
-            return extractNodePredicate(predicateContext.nodePredicate());
+            return withNegation(extractNodePredicate(predicateContext.nodePredicate()), prefixedNegation);
         }
-        return extractRedefinePredicate(predicateContext.redefinePredicate());
+        if (predicateContext.spellingPredicate() != null) {
+            return withNegation(extractSpellingPredicate(predicateContext.spellingPredicate()), prefixedNegation);
+        }
+        return withNegation(extractRedefinePredicate(predicateContext.redefinePredicate()), prefixedNegation);
+    }
+
+    private NodePredicate extractSpellingPredicate(MmlQueryParser.SpellingPredicateContext predicateContext) {
+        if (predicateContext == null || predicateContext.spellingClause() == null) {
+            throw new IllegalArgumentException("Spelling predicate cannot be blank.");
+        }
+        PredicateAttributeData attributeData = extractSpellingClause(predicateContext.spellingClause());
+        return new NodePredicate("*", attributeData.attributeName(), attributeData.attributeValue());
+    }
+
+    private NodePredicate withNegation(NodePredicate predicate, boolean negated) {
+        if (predicate == null || !negated) {
+            return predicate;
+        }
+        predicate.setNegated(!predicate.isNegated());
+        return predicate;
     }
 
     private NodePredicate extractRedefinePredicate(MmlQueryParser.RedefinePredicateContext predicateContext) {
@@ -371,6 +399,63 @@ public class AstBuilder extends MmlQueryBaseVisitor<Object> {
         };
     }
 
+    private PredicateAttributeData extractPredicateAttribute(MmlQueryParser.PredicateAttributeContext context) {
+        if (context == null) {
+            return null;
+        }
+        if (context.spellingClause() != null) {
+            PredicateAttributeData spellingData = extractSpellingClause(context.spellingClause());
+            boolean negated = context.NOT() != null;
+            return new PredicateAttributeData(spellingData.attributeName(), spellingData.attributeValue(), negated);
+        }
+
+        String attributeName = normalizeAttributeName(readIdentifierText(context.attributeName().getText()));
+        if (attributeName.isBlank()) {
+            throw new IllegalArgumentException("Predicate attribute name cannot be blank.");
+        }
+        String attributeValue = parseStringLiteral(context.stringLiteral().getText());
+        return new PredicateAttributeData(attributeName, attributeValue, false);
+    }
+
+    private PredicateAttributeData extractSpellingClause(MmlQueryParser.SpellingClauseContext context) {
+        if (context == null || context.predicateValue() == null) {
+            throw new IllegalArgumentException("Spelling predicate value cannot be blank.");
+        }
+        String value = parsePredicateValue(context.predicateValue());
+        if (value == null || value.isBlank()) {
+            throw new IllegalArgumentException("Spelling predicate value cannot be blank.");
+        }
+        return new PredicateAttributeData("spelling", value, false);
+    }
+
+    private boolean hasNegationAroundHas(ParseTree context) {
+        if (context == null) {
+            return false;
+        }
+        for (int i = 0; i < context.getChildCount() - 1; i++) {
+            String left = context.getChild(i).getText();
+            String right = context.getChild(i + 1).getText();
+            if (("has".equalsIgnoreCase(left) && "not".equalsIgnoreCase(right))
+                    || ("not".equalsIgnoreCase(left) && "has".equalsIgnoreCase(right))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private String parsePredicateValue(MmlQueryParser.PredicateValueContext context) {
+        if (context == null) {
+            return "";
+        }
+        if (context.stringLiteral() != null) {
+            return parseStringLiteral(context.stringLiteral().getText());
+        }
+        if (context.nodeName() != null) {
+            return readIdentifierText(context.nodeName().getText());
+        }
+        return "";
+    }
+
     private String buildScopedCriterion(List<ScopedPredicate> predicates) {
         if (predicates == null || predicates.isEmpty()) {
             throw new IllegalArgumentException("At least one scoped predicate is required.");
@@ -387,6 +472,9 @@ public class AstBuilder extends MmlQueryBaseVisitor<Object> {
         for (int i = 0; i < predicates.size(); i++) {
             ScopedPredicate predicate = predicates.get(i);
             sb.append("|n").append(i).append('=').append(encodeCriterionValue(predicate.nodeName()));
+            if (predicate.negated()) {
+                sb.append("|neg").append(i).append("=1");
+            }
             if (predicate.attributeName() != null && !predicate.attributeName().isBlank()) {
                 sb.append("|a").append(i).append('=').append(encodeCriterionValue(predicate.attributeName()));
                 sb.append("|v").append(i).append('=').append(encodeCriterionValue(
@@ -406,8 +494,11 @@ public class AstBuilder extends MmlQueryBaseVisitor<Object> {
             return "";
         }
 
-        normalized = normalized.replace('_', '-');
-        if (!normalized.contains("-")) {
+        boolean containsWildcard = normalized.contains("*") || normalized.contains("_");
+        if (!containsWildcard) {
+            normalized = normalized.replace('_', '-');
+        }
+        if (!containsWildcard && !normalized.contains("-")) {
             normalized = normalized
                     .replaceAll("([A-Z]+)([A-Z][a-z])", "$1-$2")
                     .replaceAll("([a-z0-9])([A-Z])", "$1-$2");
@@ -467,6 +558,15 @@ public class AstBuilder extends MmlQueryBaseVisitor<Object> {
         return text;
     }
 
-    private record ScopedPredicate(String scope, String nodeName, String attributeName, String attributeValue) {
+    private record ScopedPredicate(
+            String scope,
+            String nodeName,
+            String attributeName,
+            String attributeValue,
+            boolean negated
+    ) {
+    }
+
+    private record PredicateAttributeData(String attributeName, String attributeValue, boolean negated) {
     }
 }

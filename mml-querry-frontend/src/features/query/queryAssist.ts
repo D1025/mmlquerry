@@ -3,7 +3,8 @@ import type { SyntaxResponse } from './queryApi'
 const START_KEYWORDS = ['list', 'article']
 const SCOPE_KEYWORDS = ['item', 'proposition']
 const CLAUSE_KEYWORDS = ['of', 'in', 'where', 'has', 'and', 'or', 'butnot', 'not']
-const LIST_TYPES = ['theorem', 'definition', 'statement', 'registration', 'constructor', 'all']
+const LIST_TYPES = ['theorem', 'definition', 'statement', 'registration', 'symbol', 'all']
+const SYMBOL_QUERY_KEYWORDS = ['occurrences', 'symbols']
 const REDEFINE_KEYWORDS = ['redefine', 'redefined', 'true', 'false', 'both']
 const PIPELINE_KEYWORDS = [
   'ref',
@@ -46,6 +47,7 @@ const VALID_KEYWORDS = new Set(
     ...SCOPE_KEYWORDS,
     ...CLAUSE_KEYWORDS,
     ...LIST_TYPES,
+    ...SYMBOL_QUERY_KEYWORDS,
     ...REDEFINE_KEYWORDS,
     ...PIPELINE_KEYWORDS,
     ...ATTRIBUTE_HINTS,
@@ -54,7 +56,13 @@ const VALID_KEYWORDS = new Set(
 
 const WORD_REGEX = /[A-Za-z0-9_-]/
 const HAS_NODE_REGEX =
-  /\b(?:item|proposition)\s+has\s+("[^"\\]*(?:\\.[^"\\]*)*"|'[^'\\]*(?:\\.[^'\\]*)*'|[A-Za-z][A-Za-z0-9_-]*)/gi
+  /\bhas\s+(?:not\s+)?("[^"\\]*(?:\\.[^"\\]*)*"|'[^'\\]*(?:\\.[^'\\]*)*'|[A-Za-z][A-Za-z0-9_-]*)/gi
+const NODES_SELECTOR_REGEX =
+  /\bnodes\s+("[^"\\]*(?:\\.[^"\\]*)*"|'[^'\\]*(?:\\.[^'\\]*)*'|[A-Za-z][A-Za-z0-9_-]*)/gi
+const LIST_TYPE_KEYWORDS = new Set(['theorem', 'theorems', 'definition', 'definitions', 'statement', 'statements', 'registration', 'registrations', 'symbol', 'symbols', 'all'])
+const CONNECTOR_KEYWORDS = new Set(['and', 'or', 'butnot'])
+const DISALLOWED_AFTER_KEYWORD = new Set(['and', 'or', 'butnot', 'where', 'in', 'of', 'has', '|'])
+const DISALLOWED_AFTER_WHERE = new Set(['and', 'or', 'butnot', 'where', 'in', 'of', '|'])
 
 export interface QueryValidationResult {
   errors: string[]
@@ -108,6 +116,7 @@ function buildSuggestionDictionary(syntax: SyntaxResponse | null): string[] {
     ...START_KEYWORDS,
     ...CLAUSE_KEYWORDS,
     ...LIST_TYPES,
+    ...SYMBOL_QUERY_KEYWORDS,
     ...REDEFINE_KEYWORDS,
     ...SCOPE_KEYWORDS,
     ...PIPELINE_KEYWORDS,
@@ -258,6 +267,80 @@ function validatePairs(query: string): string[] {
   return errors
 }
 
+function extractWordTokens(query: string): string[] {
+  const sanitized = query.replace(
+    /'([^'\\]|\\.)*'|"([^"\\]|\\.)*"/g,
+    ' ',
+  )
+  return sanitized.match(/[A-Za-z][A-Za-z0-9_-]*/g) ?? []
+}
+
+function validateSyntaxShape(query: string): string[] {
+  const errors: string[] = []
+  const trimmed = query.trim()
+  if (!trimmed) {
+    return errors
+  }
+
+  if (/^\|/.test(trimmed) || /\|$/.test(trimmed)) {
+    errors.push('Znak "|" nie moze byc na poczatku ani na koncu zapytania.')
+  }
+  if (/\|\s*\|/.test(trimmed)) {
+    errors.push('Wykryto podwojony operator pipeline "||".')
+  }
+
+  const tokens = extractWordTokens(trimmed).map((token) => token.toLowerCase())
+  if (tokens.length === 0) {
+    return errors
+  }
+
+  const first = tokens[0]
+  if (first === 'list') {
+    if (tokens[1] !== 'of') {
+      errors.push('Po "list" oczekiwano slowa "of".')
+    }
+    if (!tokens[2]) {
+      errors.push('Brakuje typu listy po "list of".')
+    } else if (!LIST_TYPE_KEYWORDS.has(tokens[2])) {
+      errors.push(`Nieznany typ listy: "${tokens[2]}".`)
+    }
+  } else if (first === 'occurrences') {
+    if (tokens[1] !== 'of') {
+      errors.push('Po "occurrences" oczekiwano slowa "of".')
+    }
+    if (!tokens[2] || !['symbol', 'symbols'].includes(tokens[2])) {
+      errors.push('Zapytanie "occurrences" wymaga frazy "occurrences of symbols".')
+    }
+  } else if (first !== 'article') {
+    errors.push('Zapytanie powinno zaczynac sie od "list", "occurrences" albo "article".')
+  }
+
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i]
+    const next = tokens[i + 1]
+    const prev = tokens[i - 1]
+
+    if (CONNECTOR_KEYWORDS.has(token)) {
+      if (!next || !prev || CONNECTOR_KEYWORDS.has(next) || CONNECTOR_KEYWORDS.has(prev)) {
+        errors.push(`Operator "${token}" jest uzyty w niepoprawnym miejscu.`)
+      }
+    }
+
+    if (token === 'where' || token === 'has' || token === 'nodes' || token === 'in') {
+      if (!next) {
+        errors.push(`Po "${token}" brakuje dalszej czesci zapytania.`)
+      } else if (
+        (token === 'where' && DISALLOWED_AFTER_WHERE.has(next))
+        || (token !== 'where' && DISALLOWED_AFTER_KEYWORD.has(next))
+      ) {
+        errors.push(`Po "${token}" oczekiwano wyrazenia, a znaleziono "${next}".`)
+      }
+    }
+  }
+
+  return Array.from(new Set(errors)).slice(0, 6)
+}
+
 function buildKnownValidationTokens(syntax: SyntaxResponse | null): Set<string> {
   const supportedPipelineOperations = (syntax?.supportedPipelineOperations ?? [])
     .map(extractLeadingWord)
@@ -279,7 +362,7 @@ function buildKnownValidationTokens(syntax: SyntaxResponse | null): Set<string> 
 
 function validateKeywordTypos(query: string, syntax: SyntaxResponse | null): string[] {
   const warnings: string[] = []
-  const matches = query.match(/[A-Za-z][A-Za-z0-9_-]*/g) ?? []
+  const matches = extractWordTokens(query)
   const seen = new Set<string>()
   const knownTokens = buildKnownValidationTokens(syntax)
 
@@ -323,11 +406,32 @@ function stripOuterQuotes(raw: string): string {
   return text
 }
 
+function hasUnescapedWildcard(raw: string): boolean {
+  let escaped = false
+  for (const ch of raw) {
+    if (escaped) {
+      escaped = false
+      continue
+    }
+    if (ch === '\\') {
+      escaped = true
+      continue
+    }
+    if (ch === '*' || ch === '_') {
+      return true
+    }
+  }
+  return false
+}
+
 function normalizeNodeNameLikeBackend(raw: string): string {
   let normalized = stripOuterQuotes(raw).trim()
   if (!normalized) return ''
-  normalized = normalized.replaceAll('_', '-')
-  if (!normalized.includes('-')) {
+  const containsWildcard = hasUnescapedWildcard(normalized)
+  if (!containsWildcard) {
+    normalized = normalized.replaceAll('_', '-')
+  }
+  if (!containsWildcard && !normalized.includes('-')) {
     normalized = normalized
       .replaceAll(/([A-Z]+)([A-Z][a-z])/g, '$1-$2')
       .replaceAll(/([a-z0-9])([A-Z])/g, '$1-$2')
@@ -338,6 +442,17 @@ function normalizeNodeNameLikeBackend(raw: string): string {
 function extractNodeNamesAfterHas(query: string): string[] {
   const out: string[] = []
   for (const match of query.matchAll(HAS_NODE_REGEX)) {
+    const candidate = match[1]
+    if (candidate) {
+      out.push(candidate)
+    }
+  }
+  return out
+}
+
+function extractNodeNamesAfterNodes(query: string): string[] {
+  const out: string[] = []
+  for (const match of query.matchAll(NODES_SELECTOR_REGEX)) {
     const candidate = match[1]
     if (candidate) {
       out.push(candidate)
@@ -373,8 +488,13 @@ function validateKnownNodeNames(query: string, syntax: SyntaxResponse | null): s
   )
   const errors: string[] = []
   const seen = new Set<string>()
+  const rawCandidates = [...extractNodeNamesAfterHas(query), ...extractNodeNamesAfterNodes(query)]
 
-  for (const rawNodeName of extractNodeNamesAfterHas(query)) {
+  for (const rawNodeName of rawCandidates) {
+    const stripped = stripOuterQuotes(rawNodeName)
+    if (hasUnescapedWildcard(stripped)) {
+      continue
+    }
     const normalizedNode = normalizeNodeNameLikeBackend(rawNodeName)
     if (!normalizedNode || seen.has(normalizedNode)) {
       continue
@@ -405,9 +525,10 @@ export function validateQueryText(
     return { errors: [], warnings: [] }
   }
   const structuralErrors = validatePairs(query)
+  const syntaxShapeErrors = validateSyntaxShape(query)
   const nodeErrors = validateKnownNodeNames(query, syntax)
   return {
-    errors: [...structuralErrors, ...nodeErrors],
+    errors: [...structuralErrors, ...syntaxShapeErrors, ...nodeErrors],
     warnings: validateKeywordTypos(query, syntax),
   }
 }

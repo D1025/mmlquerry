@@ -34,6 +34,22 @@ class QueryParserTest {
     }
 
     @Test
+    void parsesTheoremPredicateWithSpellingShorthand() {
+        QueryNode bracketNode = parser.parseQuery(
+                "list of theorem where proposition has InfixTerm[spelling='Element']"
+        );
+        QueryNode shorthandNode = parser.parseQuery(
+                "list of theorem where proposition has InfixTerm spelling 'Element'"
+        );
+
+        assertInstanceOf(SelectiveQueryNode.class, bracketNode);
+        assertInstanceOf(SelectiveQueryNode.class, shorthandNode);
+        SelectiveQueryNode bracket = (SelectiveQueryNode) bracketNode;
+        SelectiveQueryNode shorthand = (SelectiveQueryNode) shorthandNode;
+        assertEquals(bracket.getCriterion(), shorthand.getCriterion());
+    }
+
+    @Test
     void parsesThesisNodePredicate() {
         QueryNode node = parser.parseQuery(
                 "list of theorem where proposition has Thesis"
@@ -66,6 +82,18 @@ class QueryParserTest {
         SelectiveQueryNode selective = (SelectiveQueryNode) node;
         assertInstanceOf(ListQueryNode.class, selective.getQuery());
         assertTrue(selective.getCriterion().startsWith("NODE_HAS|scope=item|count=2|"));
+    }
+
+    @Test
+    void parsesDefinitionScopedPredicateWithNotSpellingAttribute() {
+        QueryNode node = parser.parseQuery(
+                "list of definition where item has Redefine[occurs='true'] and item has * not spelling 'Noetherian'"
+        );
+
+        assertInstanceOf(SelectiveQueryNode.class, node);
+        SelectiveQueryNode selective = (SelectiveQueryNode) node;
+        assertTrue(selective.getCriterion().startsWith("NODE_HAS|scope=item|count=2|"));
+        assertTrue(selective.getCriterion().contains("|neg1=1"));
     }
 
     @Test
@@ -102,6 +130,122 @@ class QueryParserTest {
         assertEquals("*", operation.getDescendantPredicates().get(1).getNodeName());
         assertEquals("spelling", operation.getDescendantPredicates().get(1).getAttributeName());
         assertEquals("Noetherian", operation.getDescendantPredicates().get(1).getAttributeValue());
+    }
+
+    @Test
+    void parsesNodeSelectionWithSpellingShorthandOnNodePredicate() {
+        QueryNode node = parser.parseQuery(
+                "list of definition | nodes Item where has * spelling 'Noetherian'"
+        );
+
+        assertInstanceOf(OperationQueryNode.class, node);
+        OperationQueryNode operationQuery = (OperationQueryNode) node;
+        assertInstanceOf(NodeSelectionOperationNode.class, operationQuery.getOperation());
+
+        NodeSelectionOperationNode operation = (NodeSelectionOperationNode) operationQuery.getOperation();
+        assertEquals(1, operation.getDescendantPredicates().size());
+        assertEquals("*", operation.getDescendantPredicates().get(0).getNodeName());
+        assertEquals("spelling", operation.getDescendantPredicates().get(0).getAttributeName());
+        assertEquals("Noetherian", operation.getDescendantPredicates().get(0).getAttributeValue());
+    }
+
+    @Test
+    void parsesNodeSelectionWithHasAnyNodeNotSpellingShorthand() {
+        QueryNode node = parser.parseQuery(
+                "list of definition | nodes Item where has * not spelling 'Noetherian'"
+        );
+
+        assertInstanceOf(OperationQueryNode.class, node);
+        OperationQueryNode operationQuery = (OperationQueryNode) node;
+        assertInstanceOf(NodeSelectionOperationNode.class, operationQuery.getOperation());
+
+        NodeSelectionOperationNode operation = (NodeSelectionOperationNode) operationQuery.getOperation();
+        assertEquals(1, operation.getDescendantPredicates().size());
+        NodePredicate predicate = operation.getDescendantPredicates().get(0);
+        assertEquals("*", predicate.getNodeName());
+        assertEquals("spelling", predicate.getAttributeName());
+        assertEquals("Noetherian", predicate.getAttributeValue());
+        assertTrue(predicate.isNegated());
+    }
+
+    @Test
+    void parsesNodeSelectionWithStandaloneSpellingShorthand() {
+        QueryNode node = parser.parseQuery(
+                "list of definition | nodes Item where spelling 'Noetherian'"
+        );
+
+        assertInstanceOf(OperationQueryNode.class, node);
+        OperationQueryNode operationQuery = (OperationQueryNode) node;
+        assertInstanceOf(NodeSelectionOperationNode.class, operationQuery.getOperation());
+
+        NodeSelectionOperationNode operation = (NodeSelectionOperationNode) operationQuery.getOperation();
+        assertEquals(1, operation.getDescendantPredicates().size());
+        assertEquals("*", operation.getDescendantPredicates().get(0).getNodeName());
+        assertEquals("spelling", operation.getDescendantPredicates().get(0).getAttributeName());
+        assertEquals("Noetherian", operation.getDescendantPredicates().get(0).getAttributeValue());
+    }
+
+    @Test
+    void parsesNodeSelectionWithNotSpellingShorthand() {
+        QueryNode node = parser.parseQuery(
+                "list of definition | nodes Item where not spelling 'Noetherian'"
+        );
+
+        assertInstanceOf(OperationQueryNode.class, node);
+        OperationQueryNode operationQuery = (OperationQueryNode) node;
+        NodeSelectionOperationNode operation = (NodeSelectionOperationNode) operationQuery.getOperation();
+        assertEquals(1, operation.getDescendantPredicates().size());
+        NodePredicate predicate = operation.getDescendantPredicates().get(0);
+        assertEquals("*", predicate.getNodeName());
+        assertEquals("spelling", predicate.getAttributeName());
+        assertEquals("Noetherian", predicate.getAttributeValue());
+        assertTrue(predicate.isNegated());
+    }
+
+    @Test
+    void parsesNodeSelectionWithNotHasNodePredicate() {
+        QueryNode node = parser.parseQuery(
+                "list of definition | nodes Item where not has Redefine[occurs='true']"
+        );
+
+        assertInstanceOf(OperationQueryNode.class, node);
+        OperationQueryNode operationQuery = (OperationQueryNode) node;
+        NodeSelectionOperationNode operation = (NodeSelectionOperationNode) operationQuery.getOperation();
+        assertEquals(1, operation.getDescendantPredicates().size());
+        NodePredicate predicate = operation.getDescendantPredicates().get(0);
+        assertEquals("redefine", predicate.getNodeName());
+        assertEquals("occurs", predicate.getAttributeName());
+        assertEquals("true", predicate.getAttributeValue());
+        assertTrue(predicate.isNegated());
+    }
+
+    @Test
+    void parsesNodeSelectionWithHasNotNodePredicate() {
+        QueryNode node = parser.parseQuery(
+                "list of definition | nodes Item where has not Redefine[occurs='true']"
+        );
+
+        assertInstanceOf(OperationQueryNode.class, node);
+        OperationQueryNode operationQuery = (OperationQueryNode) node;
+        NodeSelectionOperationNode operation = (NodeSelectionOperationNode) operationQuery.getOperation();
+        assertEquals(1, operation.getDescendantPredicates().size());
+        NodePredicate predicate = operation.getDescendantPredicates().get(0);
+        assertEquals("redefine", predicate.getNodeName());
+        assertEquals("occurs", predicate.getAttributeName());
+        assertEquals("true", predicate.getAttributeValue());
+        assertTrue(predicate.isNegated());
+    }
+
+    @Test
+    void parsesScopedPredicateWithHasNotNode() {
+        QueryNode node = parser.parseQuery(
+                "list of theorem where proposition has not InfixTerm[spelling='Element']"
+        );
+
+        assertInstanceOf(SelectiveQueryNode.class, node);
+        SelectiveQueryNode selective = (SelectiveQueryNode) node;
+        assertTrue(selective.getCriterion().startsWith("NODE_HAS|scope=proposition|count=1|"));
+        assertTrue(selective.getCriterion().contains("|neg0=1"));
     }
 
     @Test
@@ -142,7 +286,7 @@ class QueryParserTest {
 
     @Test
     void parsesPipelineWithCardinalityFilter() {
-        QueryNode node = parser.parseQuery("ABCMIZ_0:func 1 | ref | wherege(ref,2)");
+        QueryNode node = parser.parseQuery("list of theorem | ref | wherege(ref,2)");
         assertInstanceOf(OperationQueryNode.class, node);
 
         OperationQueryNode outer = (OperationQueryNode) node;
@@ -157,5 +301,123 @@ class QueryParserTest {
     void parsesCompoundBooleanOperators() {
         QueryNode node = parser.parseQuery("list of theorem and not list of definition");
         assertInstanceOf(CompoundQueryNode.class, node);
+    }
+
+    @Test
+    void parsesUnaryNotQuery() {
+        QueryNode node = parser.parseQuery("not list of definition");
+        assertInstanceOf(GroupQueryNode.class, node);
+
+        GroupQueryNode group = (GroupQueryNode) node;
+        assertEquals(GroupQuantifier.NONE, group.getQuantifier());
+        assertInstanceOf(ListQueryNode.class, group.getInner());
+    }
+
+    @Test
+    void parsesButnotQuery() {
+        QueryNode node = parser.parseQuery("list of theorem butnot list of definition");
+        assertInstanceOf(CompoundQueryNode.class, node);
+
+        CompoundQueryNode compound = (CompoundQueryNode) node;
+        assertEquals(CompoundOperator.BUTNOT, compound.getOperator());
+        assertInstanceOf(ListQueryNode.class, compound.getLeft());
+        assertInstanceOf(ListQueryNode.class, compound.getRight());
+    }
+
+    @Test
+    void parsesPartialNegationInAndQuery() {
+        QueryNode node = parser.parseQuery("list of theorem and not list of definition");
+        assertInstanceOf(CompoundQueryNode.class, node);
+
+        CompoundQueryNode compound = (CompoundQueryNode) node;
+        assertEquals(CompoundOperator.AND, compound.getOperator());
+        assertInstanceOf(ListQueryNode.class, compound.getLeft());
+        assertInstanceOf(GroupQueryNode.class, compound.getRight());
+
+        GroupQueryNode negatedRight = (GroupQueryNode) compound.getRight();
+        assertEquals(GroupQuantifier.NONE, negatedRight.getQuantifier());
+        assertInstanceOf(ListQueryNode.class, negatedRight.getInner());
+    }
+
+    @Test
+    void parsesNegationWithParenthesizedSubquery() {
+        QueryNode node = parser.parseQuery(
+                "list of theorem and not (list of definition or list of registration)"
+        );
+        assertInstanceOf(CompoundQueryNode.class, node);
+
+        CompoundQueryNode compound = (CompoundQueryNode) node;
+        assertEquals(CompoundOperator.AND, compound.getOperator());
+        assertInstanceOf(ListQueryNode.class, compound.getLeft());
+        assertInstanceOf(GroupQueryNode.class, compound.getRight());
+
+        GroupQueryNode negated = (GroupQueryNode) compound.getRight();
+        assertEquals(GroupQuantifier.NONE, negated.getQuantifier());
+        assertInstanceOf(CompoundQueryNode.class, negated.getInner());
+        CompoundQueryNode inner = (CompoundQueryNode) negated.getInner();
+        assertEquals(CompoundOperator.OR, inner.getOperator());
+    }
+
+    @Test
+    void parsesListOfSymbols() {
+        QueryNode node = parser.parseQuery("list of symbols");
+        assertInstanceOf(ListQueryNode.class, node);
+        ListQueryNode list = (ListQueryNode) node;
+        assertEquals(ListType.SYMBOLS, list.getListType());
+        assertNull(list.getSymbolSpellingFilter());
+    }
+
+    @Test
+    void parsesListOfSymbolsWithSpellingFilter() {
+        QueryNode node = parser.parseQuery("list of symbols where spelling '+'");
+        assertInstanceOf(ListQueryNode.class, node);
+        ListQueryNode list = (ListQueryNode) node;
+        assertEquals(ListType.SYMBOLS, list.getListType());
+        assertEquals("+", list.getSymbolSpellingFilter());
+    }
+
+    @Test
+    void parsesOccurrencesOfSymbols() {
+        QueryNode node = parser.parseQuery("occurrences of symbols");
+        assertInstanceOf(ListQueryNode.class, node);
+        ListQueryNode list = (ListQueryNode) node;
+        assertEquals(ListType.SYMBOL_OCCURRENCES, list.getListType());
+    }
+
+    @Test
+    void parsesOccurrencesOfSymbolsWithFilterPattern() {
+        QueryNode node = parser.parseQuery("occurrences of symbols | filter('spelling=ali*')");
+        assertInstanceOf(OperationQueryNode.class, node);
+    }
+
+    @Test
+    void parsesEscapedWildcardLiteralsInFilterPattern() {
+        QueryNode node = parser.parseQuery("occurrences of symbols | filter('spelling=A\\*B\\_C')");
+        assertInstanceOf(OperationQueryNode.class, node);
+
+        OperationQueryNode operationQuery = (OperationQueryNode) node;
+        assertInstanceOf(FilterOperationNode.class, operationQuery.getOperation());
+        FilterOperationNode filter = (FilterOperationNode) operationQuery.getOperation();
+        assertEquals("spelling=A\\*B\\_C", filter.getFilterCriteria());
+    }
+
+    @Test
+    void parsesNodePatternWithWildcardInNameAndAttributeValue() {
+        QueryNode node = parser.parseQuery(
+                "list of definition | nodes Item where has \"*-pattern\"[spelling='Noeth*']"
+        );
+        assertInstanceOf(OperationQueryNode.class, node);
+    }
+
+    @Test
+    void parsesNodePatternWithEscapedWildcardLiteralsInAttributeValue() {
+        QueryNode node = parser.parseQuery(
+                "list of definition | nodes Item where has \"*-pattern\"[spelling='A\\*B\\_C']"
+        );
+        assertInstanceOf(OperationQueryNode.class, node);
+
+        OperationQueryNode operationQuery = (OperationQueryNode) node;
+        NodeSelectionOperationNode operation = (NodeSelectionOperationNode) operationQuery.getOperation();
+        assertEquals("A\\*B\\_C", operation.getDescendantPredicates().get(0).getAttributeValue());
     }
 }

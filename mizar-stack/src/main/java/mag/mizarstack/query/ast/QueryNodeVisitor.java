@@ -5,7 +5,6 @@ package mag.mizarstack.query.ast;
  */
 public interface QueryNodeVisitor<T> {
     T visitListQuery(ListQueryNode node);
-    T visitConstructorQuery(ConstructorQueryNode node);
     T visitArticleQuery(ArticleQueryNode node);
     T visitGroupQuery(GroupQueryNode node);
     T visitCompoundQuery(CompoundQueryNode node);
