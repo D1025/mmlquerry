@@ -30,6 +30,10 @@ export interface ExecuteQueryRequest {
   filter?: string
 }
 
+export interface ExecuteQueryOptions {
+  signal?: AbortSignal
+}
+
 export interface QueryTiming {
   parseMs: number
   executeMs: number
@@ -88,13 +92,17 @@ export async function getSyntax(): Promise<SyntaxResponse> {
   return parseResponse<SyntaxResponse>(response)
 }
 
-export async function executeQuery(request: ExecuteQueryRequest): Promise<ExecuteQueryResponse> {
+export async function executeQuery(
+  request: ExecuteQueryRequest,
+  options?: ExecuteQueryOptions,
+): Promise<ExecuteQueryResponse> {
   const response = await fetch(`${API_BASE_URL}/query/execute`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(request),
+    signal: options?.signal,
   })
 
   return parseResponse<ExecuteQueryResponse>(response)

@@ -30,8 +30,10 @@ const initialState: QueryState = {
 
 export const fetchSyntax = createAsyncThunk('query/fetchSyntax', async () => getSyntax())
 
-export const runQuery = createAsyncThunk('query/runQuery', async (request: ExecuteQueryRequest) =>
-  executeQuery(request),
+export const runQuery = createAsyncThunk(
+  'query/runQuery',
+  async (request: ExecuteQueryRequest, thunkApi) =>
+    executeQuery(request, { signal: thunkApi.signal }),
 )
 
 const querySlice = createSlice({
@@ -74,6 +76,11 @@ const querySlice = createSlice({
         state.result = action.payload
       })
       .addCase(runQuery.rejected, (state, action) => {
+        if (action.meta.aborted) {
+          state.executeStatus = 'idle'
+          state.executeError = null
+          return
+        }
         state.executeStatus = 'failed'
         state.executeError = action.error.message ?? 'Unable to execute query.'
       })

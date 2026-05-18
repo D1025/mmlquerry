@@ -6,6 +6,7 @@ const CLAUSE_KEYWORDS = ['of', 'in', 'where', 'has', 'and', 'or', 'butnot', 'not
 const LIST_TYPES = ['theorem', 'definition', 'statement', 'registration', 'symbol', 'all']
 const SYMBOL_QUERY_KEYWORDS = ['occurrences', 'symbols']
 const REDEFINE_KEYWORDS = ['redefine', 'redefined', 'true', 'false', 'both']
+const NEGATED_ADJECTIVE_KEYWORDS = ['negated', 'adjective']
 const PIPELINE_KEYWORDS = [
   'ref',
   'occur',
@@ -29,6 +30,11 @@ const PIPELINE_KEYWORDS = [
   'wherele',
   'wheregt',
   'wherelt',
+  'numeq',
+  'numge',
+  'numle',
+  'numgt',
+  'numlt',
 ]
 const NODE_HINTS = [
   'InfixTerm',
@@ -49,20 +55,30 @@ const VALID_KEYWORDS = new Set(
     ...LIST_TYPES,
     ...SYMBOL_QUERY_KEYWORDS,
     ...REDEFINE_KEYWORDS,
+    ...NEGATED_ADJECTIVE_KEYWORDS,
     ...PIPELINE_KEYWORDS,
     ...ATTRIBUTE_HINTS,
   ].map((token) => token.toLowerCase()),
 )
 
 const WORD_REGEX = /[A-Za-z0-9_-]/
+const UNQUOTED_NODE_WITH_PATH_REGEX =
+  '[A-Za-z][A-Za-z0-9_-]*(?:(?:\\/\\/|\\/[0-9]+\\/|\\/)[A-Za-z][A-Za-z0-9_-]*)*'
 const HAS_NODE_REGEX =
-  /\bhas\s+(?:not\s+)?("[^"\\]*(?:\\.[^"\\]*)*"|'[^'\\]*(?:\\.[^'\\]*)*'|[A-Za-z][A-Za-z0-9_-]*)/gi
+  new RegExp(
+    `\\bhas\\s+(?:not\\s+)?("[^"\\\\]*(?:\\\\.[^"\\\\]*)*"|'[^'\\\\]*(?:\\\\.[^'\\\\]*)*'|${UNQUOTED_NODE_WITH_PATH_REGEX})`,
+    'gi',
+  )
 const NODES_SELECTOR_REGEX =
-  /\bnodes\s+("[^"\\]*(?:\\.[^"\\]*)*"|'[^'\\]*(?:\\.[^'\\]*)*'|[A-Za-z][A-Za-z0-9_-]*)/gi
+  new RegExp(
+    `\\bnodes\\s+("[^"\\\\]*(?:\\\\.[^"\\\\]*)*"|'[^'\\\\]*(?:\\\\.[^'\\\\]*)*'|${UNQUOTED_NODE_WITH_PATH_REGEX})`,
+    'gi',
+  )
 const LIST_TYPE_KEYWORDS = new Set(['theorem', 'theorems', 'definition', 'definitions', 'statement', 'statements', 'registration', 'registrations', 'symbol', 'symbols', 'all'])
 const CONNECTOR_KEYWORDS = new Set(['and', 'or', 'butnot'])
 const DISALLOWED_AFTER_KEYWORD = new Set(['and', 'or', 'butnot', 'where', 'in', 'of', 'has', '|'])
 const DISALLOWED_AFTER_WHERE = new Set(['and', 'or', 'butnot', 'where', 'in', 'of', '|'])
+const SYNTAX_STRING_PLACEHOLDER = 'stringliteral'
 
 export interface QueryValidationResult {
   errors: string[]
@@ -118,6 +134,7 @@ function buildSuggestionDictionary(syntax: SyntaxResponse | null): string[] {
     ...LIST_TYPES,
     ...SYMBOL_QUERY_KEYWORDS,
     ...REDEFINE_KEYWORDS,
+    ...NEGATED_ADJECTIVE_KEYWORDS,
     ...SCOPE_KEYWORDS,
     ...PIPELINE_KEYWORDS,
     ...NODE_HINTS,
@@ -275,6 +292,14 @@ function extractWordTokens(query: string): string[] {
   return sanitized.match(/[A-Za-z][A-Za-z0-9_-]*/g) ?? []
 }
 
+function extractSyntaxShapeTokens(query: string): string[] {
+  const sanitized = query.replace(
+    /'([^'\\]|\\.)*'|"([^"\\]|\\.)*"/g,
+    ` ${SYNTAX_STRING_PLACEHOLDER} `,
+  )
+  return sanitized.match(/[A-Za-z][A-Za-z0-9_-]*/g) ?? []
+}
+
 function validateSyntaxShape(query: string): string[] {
   const errors: string[] = []
   const trimmed = query.trim()
@@ -289,7 +314,7 @@ function validateSyntaxShape(query: string): string[] {
     errors.push('Wykryto podwojony operator pipeline "||".')
   }
 
-  const tokens = extractWordTokens(trimmed).map((token) => token.toLowerCase())
+  const tokens = extractSyntaxShapeTokens(trimmed).map((token) => token.toLowerCase())
   if (tokens.length === 0) {
     return errors
   }
@@ -425,7 +450,24 @@ function hasUnescapedWildcard(raw: string): boolean {
 }
 
 function normalizeNodeNameLikeBackend(raw: string): string {
-  let normalized = stripOuterQuotes(raw).trim()
+  const stripped = stripOuterQuotes(raw).trim()
+  if (!stripped) return ''
+
+  const parsedPath = parseNodePathExpression(stripped)
+  if (parsedPath) {
+    let out = normalizeSingleNodeNameLikeBackend(parsedPath.segments[0] ?? '')
+    for (let i = 0; i < parsedPath.steps.length; i += 1) {
+      out += formatPathStep(parsedPath.steps[i] ?? { kind: 'direct' })
+      out += normalizeSingleNodeNameLikeBackend(parsedPath.segments[i + 1] ?? '')
+    }
+    return out
+  }
+
+  return normalizeSingleNodeNameLikeBackend(stripped)
+}
+
+function normalizeSingleNodeNameLikeBackend(raw: string): string {
+  let normalized = raw.trim()
   if (!normalized) return ''
   const containsWildcard = hasUnescapedWildcard(normalized)
   if (!containsWildcard) {
@@ -436,7 +478,118 @@ function normalizeNodeNameLikeBackend(raw: string): string {
       .replaceAll(/([A-Z]+)([A-Z][a-z])/g, '$1-$2')
       .replaceAll(/([a-z0-9])([A-Z])/g, '$1-$2')
   }
+  if (
+    !containsWildcard
+    && !normalized.includes('-')
+    && normalized === normalized.toLowerCase()
+  ) {
+    normalized = insertLowercaseNodeSuffixHyphen(normalized)
+  }
   return normalized.toLowerCase()
+}
+
+interface ParsedNodePath {
+  segments: string[]
+  steps: Array<{ kind: 'direct' | 'any' | 'exact'; depth?: number }>
+}
+
+function parseNodePathExpression(raw: string): ParsedNodePath | null {
+  const text = raw.trim()
+  if (!text || !text.includes('/')) {
+    return null
+  }
+
+  const segments: string[] = []
+  const steps: Array<{ kind: 'direct' | 'any' | 'exact'; depth?: number }> = []
+  let index = 0
+
+  while (index < text.length) {
+    const slashIndex = text.indexOf('/', index)
+    if (slashIndex < 0) {
+      const tail = text.slice(index).trim()
+      if (!tail) return null
+      segments.push(tail)
+      break
+    }
+
+    const segment = text.slice(index, slashIndex).trim()
+    if (!segment) return null
+    segments.push(segment)
+
+    if (slashIndex + 1 < text.length && text.charAt(slashIndex + 1) === '/') {
+      steps.push({ kind: 'any' })
+      index = slashIndex + 2
+      continue
+    }
+
+    let cursor = slashIndex + 1
+    const digitsStart = cursor
+    while (cursor < text.length && /[0-9]/.test(text.charAt(cursor))) {
+      cursor += 1
+    }
+    if (cursor > digitsStart && cursor < text.length && text.charAt(cursor) === '/') {
+      const depth = Number.parseInt(text.slice(digitsStart, cursor), 10)
+      if (!Number.isFinite(depth) || depth <= 0) return null
+      steps.push({ kind: 'exact', depth })
+      index = cursor + 1
+      continue
+    }
+
+    steps.push({ kind: 'direct' })
+    index = slashIndex + 1
+  }
+
+  if (segments.length < 2 || steps.length !== segments.length - 1) {
+    return null
+  }
+  return { segments, steps }
+}
+
+function formatPathStep(step: { kind: 'direct' | 'any' | 'exact'; depth?: number }): string {
+  if (step.kind === 'any') return '//'
+  if (step.kind === 'exact') return `/${step.depth ?? 1}/`
+  return '/'
+}
+
+function insertLowercaseNodeSuffixHyphen(value: string): string {
+  if (!value || value.includes('-')) return value
+  const suffixes = [
+    'proposition',
+    'registration',
+    'definition',
+    'reference',
+    'statement',
+    'structure',
+    'attribute',
+    'relation',
+    'function',
+    'arguments',
+    'argument',
+    'selector',
+    'adjective',
+    'variable',
+    'variables',
+    'pattern',
+    'formula',
+    'cluster',
+    'functor',
+    'numeral',
+    'term',
+    'type',
+    'mode',
+    'item',
+    'block',
+  ]
+  for (const suffix of suffixes) {
+    if (value.length <= suffix.length + 1) continue
+    if (value.endsWith(suffix)) {
+      const prefix = value.slice(0, value.length - suffix.length)
+      if (prefix) {
+        return `${prefix}-${suffix}`
+      }
+    }
+  }
+  return value
 }
 
 function extractNodeNamesAfterHas(query: string): string[] {
@@ -483,35 +636,43 @@ function validateKnownNodeNames(query: string, syntax: SyntaxResponse | null): s
     return []
   }
 
-  const normalizedSupported = new Set<string>(
-    supportedNodeNames.map((name) => normalizeNodeNameLikeBackend(name)),
-  )
+  const normalizedSupported = new Set<string>(supportedNodeNames.map((name) => normalizeNodeNameLikeBackend(name)))
   const errors: string[] = []
   const seen = new Set<string>()
   const rawCandidates = [...extractNodeNamesAfterHas(query), ...extractNodeNamesAfterNodes(query)]
 
   for (const rawNodeName of rawCandidates) {
     const stripped = stripOuterQuotes(rawNodeName)
-    if (hasUnescapedWildcard(stripped)) {
-      continue
+    const path = parseNodePathExpression(stripped)
+    const parts = path ? path.segments : [stripped]
+
+    for (const part of parts) {
+      const lowered = part.toLowerCase()
+      if (lowered === 'negated') {
+        continue
+      }
+      if (hasUnescapedWildcard(part)) {
+        continue
+      }
+      const normalizedNode = normalizeNodeNameLikeBackend(part)
+      if (!normalizedNode || seen.has(normalizedNode)) {
+        continue
+      }
+      seen.add(normalizedNode)
+      if (normalizedSupported.has(normalizedNode)) {
+        continue
+      }
+      const closest = findClosestNodeName(part, supportedNodeNames)
+      if (closest) {
+        errors.push(`Nieznana nazwa noda: "${part}". Mozliwe, ze chodzilo o "${closest}".`)
+      } else {
+        errors.push(`Nieznana nazwa noda: "${part}".`)
+      }
+      if (errors.length >= 4) {
+        break
+      }
     }
-    const normalizedNode = normalizeNodeNameLikeBackend(rawNodeName)
-    if (!normalizedNode || seen.has(normalizedNode)) {
-      continue
-    }
-    seen.add(normalizedNode)
-    if (normalizedSupported.has(normalizedNode)) {
-      continue
-    }
-    const closest = findClosestNodeName(rawNodeName, supportedNodeNames)
-    if (closest) {
-      errors.push(`Nieznana nazwa noda: "${rawNodeName}". Mozliwe, ze chodzilo o "${closest}".`)
-    } else {
-      errors.push(`Nieznana nazwa noda: "${rawNodeName}".`)
-    }
-    if (errors.length >= 4) {
-      break
-    }
+    if (errors.length >= 4) break
   }
 
   return errors

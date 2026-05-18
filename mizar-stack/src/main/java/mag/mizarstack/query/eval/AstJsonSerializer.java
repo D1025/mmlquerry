@@ -43,6 +43,10 @@ public class AstJsonSerializer {
             return visitFilterOperation((FilterOperationNode) node);
         } else if (node instanceof GrepOperationNode) {
             return visitGrepOperation((GrepOperationNode) node);
+        } else if (node instanceof NumericValueFilterOperationNode) {
+            return visitNumericValueOperation((NumericValueFilterOperationNode) node);
+        } else if (node instanceof NodeCardinalityFilterOperationNode) {
+            return visitNodeCardinalityOperation((NodeCardinalityFilterOperationNode) node);
         } else if (node instanceof NodeSelectionOperationNode) {
             return visitNodeSelectionOperation((NodeSelectionOperationNode) node);
         } else if (node instanceof ReverseOperationNode) {
@@ -198,6 +202,24 @@ public class AstJsonSerializer {
         obj.put("type", "CardinalityFilterOperation");
         obj.put("comparator", node.getComparator().toString());
         obj.put("operation", node.getOperationType().toString());
+        obj.put("threshold", node.getThreshold());
+        return obj;
+    }
+
+    private ObjectNode visitNumericValueOperation(NumericValueFilterOperationNode node) {
+        ObjectNode obj = JsonNodeFactory.instance.objectNode();
+        obj.put("type", "NumericValueFilterOperation");
+        obj.put("comparator", node.getComparator().toString());
+        obj.put("threshold", node.getThreshold());
+        return obj;
+    }
+
+    private ObjectNode visitNodeCardinalityOperation(NodeCardinalityFilterOperationNode node) {
+        ObjectNode obj = JsonNodeFactory.instance.objectNode();
+        obj.put("type", "NodeCardinalityFilterOperation");
+        obj.put("comparator", node.getComparator().toString());
+        obj.put("scope", node.getScopeName());
+        obj.put("nodeName", node.getNodeName());
         obj.put("threshold", node.getThreshold());
         return obj;
     }

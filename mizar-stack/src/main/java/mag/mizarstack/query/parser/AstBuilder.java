@@ -14,6 +14,8 @@ import java.util.Locale;
 
 public class AstBuilder extends MmlQueryBaseVisitor<Object> {
 
+    private static final String SYNTHETIC_NEGATED_ADJECTIVE_NODE = "__negated_adjective__";
+
     public QueryNode buildQuery(MmlQueryParser.QueryContext queryContext) {
         return (QueryNode) visit(queryContext.expression());
     }
@@ -219,6 +221,36 @@ public class AstBuilder extends MmlQueryBaseVisitor<Object> {
     }
 
     @Override
+    public Object visitOpNumericValue(MmlQueryParser.OpNumericValueContext ctx) {
+        return visit(ctx.numericValueOperation());
+    }
+
+    @Override
+    public Object visitOpNumEq(MmlQueryParser.OpNumEqContext ctx) {
+        return buildNumericValueOperation(ctx.NUMBER().getText(), CardinalityComparator.EQ);
+    }
+
+    @Override
+    public Object visitOpNumGe(MmlQueryParser.OpNumGeContext ctx) {
+        return buildNumericValueOperation(ctx.NUMBER().getText(), CardinalityComparator.GE);
+    }
+
+    @Override
+    public Object visitOpNumLe(MmlQueryParser.OpNumLeContext ctx) {
+        return buildNumericValueOperation(ctx.NUMBER().getText(), CardinalityComparator.LE);
+    }
+
+    @Override
+    public Object visitOpNumGt(MmlQueryParser.OpNumGtContext ctx) {
+        return buildNumericValueOperation(ctx.NUMBER().getText(), CardinalityComparator.GT);
+    }
+
+    @Override
+    public Object visitOpNumLt(MmlQueryParser.OpNumLtContext ctx) {
+        return buildNumericValueOperation(ctx.NUMBER().getText(), CardinalityComparator.LT);
+    }
+
+    @Override
     public Object visitOpCardinality(MmlQueryParser.OpCardinalityContext ctx) {
         return visit(ctx.cardinalityOperation());
     }
@@ -248,6 +280,31 @@ public class AstBuilder extends MmlQueryBaseVisitor<Object> {
         return buildCardinalityOperation(ctx.operationName(), ctx.NUMBER().getText(), CardinalityComparator.LT);
     }
 
+    @Override
+    public Object visitOpWhereNodeEq(MmlQueryParser.OpWhereNodeEqContext ctx) {
+        return buildNodeCardinalityOperation(ctx.nodeCardinalityTarget(), ctx.NUMBER().getText(), CardinalityComparator.EQ);
+    }
+
+    @Override
+    public Object visitOpWhereNodeGe(MmlQueryParser.OpWhereNodeGeContext ctx) {
+        return buildNodeCardinalityOperation(ctx.nodeCardinalityTarget(), ctx.NUMBER().getText(), CardinalityComparator.GE);
+    }
+
+    @Override
+    public Object visitOpWhereNodeLe(MmlQueryParser.OpWhereNodeLeContext ctx) {
+        return buildNodeCardinalityOperation(ctx.nodeCardinalityTarget(), ctx.NUMBER().getText(), CardinalityComparator.LE);
+    }
+
+    @Override
+    public Object visitOpWhereNodeGt(MmlQueryParser.OpWhereNodeGtContext ctx) {
+        return buildNodeCardinalityOperation(ctx.nodeCardinalityTarget(), ctx.NUMBER().getText(), CardinalityComparator.GT);
+    }
+
+    @Override
+    public Object visitOpWhereNodeLt(MmlQueryParser.OpWhereNodeLtContext ctx) {
+        return buildNodeCardinalityOperation(ctx.nodeCardinalityTarget(), ctx.NUMBER().getText(), CardinalityComparator.LT);
+    }
+
     private CardinalityFilterOperationNode buildCardinalityOperation(
             MmlQueryParser.OperationNameContext operationNameContext,
             String thresholdRaw,
@@ -256,6 +313,33 @@ public class AstBuilder extends MmlQueryBaseVisitor<Object> {
         BasicOperationType operationType = parseOperationName(operationNameContext.getText());
         int threshold = Integer.parseInt(thresholdRaw);
         return new CardinalityFilterOperationNode(comparator, operationType, threshold);
+    }
+
+    private NodeCardinalityFilterOperationNode buildNodeCardinalityOperation(
+            MmlQueryParser.NodeCardinalityTargetContext targetContext,
+            String thresholdRaw,
+            CardinalityComparator comparator
+    ) {
+        if (targetContext == null || targetContext.nodeName() == null) {
+            throw new IllegalArgumentException("Node cardinality operation requires node name.");
+        }
+        String scope = targetContext.scopeName() == null
+                ? "item"
+                : normalizeScopeName(targetContext.scopeName().getText());
+        String nodeName = normalizeNodeName(readIdentifierText(targetContext.nodeName().getText()));
+        if (nodeName.isBlank()) {
+            throw new IllegalArgumentException("Node cardinality operation requires non-empty node name.");
+        }
+        int threshold = Integer.parseInt(thresholdRaw);
+        return new NodeCardinalityFilterOperationNode(comparator, scope, nodeName, threshold);
+    }
+
+    private NumericValueFilterOperationNode buildNumericValueOperation(
+            String thresholdRaw,
+            CardinalityComparator comparator
+    ) {
+        long threshold = Long.parseLong(thresholdRaw);
+        return new NumericValueFilterOperationNode(comparator, threshold);
     }
 
     private ListType parseListType(String text) {
@@ -288,6 +372,18 @@ public class AstBuilder extends MmlQueryBaseVisitor<Object> {
         String scope = normalizeScopeName(predicateContext.scopeName().getText());
         if (scope.isBlank()) {
             throw new IllegalArgumentException("Scope in predicate cannot be blank.");
+        }
+
+        if (predicateContext.negatedAdjectiveClause() != null) {
+            String spellingValue = extractNegatedAdjectiveSpelling(predicateContext.negatedAdjectiveClause());
+            boolean negated = hasNegationAroundHas(predicateContext);
+            return new ScopedPredicate(
+                    scope,
+                    SYNTHETIC_NEGATED_ADJECTIVE_NODE,
+                    "spelling",
+                    spellingValue,
+                    negated
+            );
         }
 
         String nodeName = normalizeNodeName(readIdentifierText(predicateContext.nodeName().getText()));
@@ -326,6 +422,17 @@ public class AstBuilder extends MmlQueryBaseVisitor<Object> {
     }
 
     private NodePredicate extractNodePredicate(MmlQueryParser.NodePredicateContext predicateContext) {
+        if (predicateContext.negatedAdjectiveClause() != null) {
+            String spellingValue = extractNegatedAdjectiveSpelling(predicateContext.negatedAdjectiveClause());
+            boolean negated = hasNegationAroundHas(predicateContext);
+            return new NodePredicate(
+                    SYNTHETIC_NEGATED_ADJECTIVE_NODE,
+                    "spelling",
+                    spellingValue,
+                    negated
+            );
+        }
+
         String nodeName = normalizeNodeName(readIdentifierText(predicateContext.nodeName().getText()));
         if (nodeName.isBlank()) {
             throw new IllegalArgumentException("Node predicate cannot be blank.");
@@ -428,6 +535,17 @@ public class AstBuilder extends MmlQueryBaseVisitor<Object> {
         return new PredicateAttributeData("spelling", value, false);
     }
 
+    private String extractNegatedAdjectiveSpelling(MmlQueryParser.NegatedAdjectiveClauseContext context) {
+        if (context == null || context.spellingClause() == null) {
+            throw new IllegalArgumentException("Negated adjective requires spelling value.");
+        }
+        PredicateAttributeData spellingData = extractSpellingClause(context.spellingClause());
+        if (spellingData.attributeValue() == null || spellingData.attributeValue().isBlank()) {
+            throw new IllegalArgumentException("Negated adjective spelling cannot be blank.");
+        }
+        return spellingData.attributeValue();
+    }
+
     private boolean hasNegationAroundHas(ParseTree context) {
         if (context == null) {
             return false;
@@ -489,11 +607,27 @@ public class AstBuilder extends MmlQueryBaseVisitor<Object> {
         if (raw == null) {
             return "";
         }
-        String normalized = raw.trim();
-        if (normalized.isEmpty()) {
+        String normalizedRaw = raw.trim();
+        if (normalizedRaw.isEmpty()) {
             return "";
         }
 
+        ParsedNodePath pathExpression = parseNodePathExpression(normalizedRaw);
+        if (pathExpression != null) {
+            StringBuilder out = new StringBuilder();
+            out.append(normalizeSingleNodeName(pathExpression.segments().get(0)));
+            for (int i = 0; i < pathExpression.steps().size(); i++) {
+                out.append(formatPathStep(pathExpression.steps().get(i)));
+                out.append(normalizeSingleNodeName(pathExpression.segments().get(i + 1)));
+            }
+            return out.toString();
+        }
+
+        return normalizeSingleNodeName(normalizedRaw);
+    }
+
+    private String normalizeSingleNodeName(String raw) {
+        String normalized = raw.trim();
         boolean containsWildcard = normalized.contains("*") || normalized.contains("_");
         if (!containsWildcard) {
             normalized = normalized.replace('_', '-');
@@ -503,7 +637,127 @@ public class AstBuilder extends MmlQueryBaseVisitor<Object> {
                     .replaceAll("([A-Z]+)([A-Z][a-z])", "$1-$2")
                     .replaceAll("([a-z0-9])([A-Z])", "$1-$2");
         }
+        if (!containsWildcard && !normalized.contains("-")
+                && normalized.equals(normalized.toLowerCase(Locale.ROOT))) {
+            normalized = insertLowercaseNodeSuffixHyphen(normalized);
+        }
         return normalized.toLowerCase(Locale.ROOT);
+    }
+
+    private ParsedNodePath parseNodePathExpression(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        String text = raw.trim();
+        if (text.isEmpty() || !text.contains("/")) {
+            return null;
+        }
+
+        List<String> segments = new ArrayList<>();
+        List<PathStep> steps = new ArrayList<>();
+        int index = 0;
+        while (index < text.length()) {
+            int slashIndex = text.indexOf('/', index);
+            if (slashIndex < 0) {
+                String tail = text.substring(index).trim();
+                if (tail.isEmpty()) {
+                    return null;
+                }
+                segments.add(tail);
+                break;
+            }
+
+            String segment = text.substring(index, slashIndex).trim();
+            if (segment.isEmpty()) {
+                return null;
+            }
+            segments.add(segment);
+
+            if (slashIndex + 1 < text.length() && text.charAt(slashIndex + 1) == '/') {
+                steps.add(PathStep.anyDepth());
+                index = slashIndex + 2;
+                continue;
+            }
+
+            int cursor = slashIndex + 1;
+            int digitsStart = cursor;
+            while (cursor < text.length() && Character.isDigit(text.charAt(cursor))) {
+                cursor++;
+            }
+
+            if (cursor > digitsStart && cursor < text.length() && text.charAt(cursor) == '/') {
+                int depth = Integer.parseInt(text.substring(digitsStart, cursor));
+                if (depth <= 0) {
+                    return null;
+                }
+                steps.add(PathStep.exactDepth(depth));
+                index = cursor + 1;
+                continue;
+            }
+
+            steps.add(PathStep.directChild());
+            index = slashIndex + 1;
+        }
+
+        if (segments.size() < 2 || steps.size() != segments.size() - 1) {
+            return null;
+        }
+        return new ParsedNodePath(List.copyOf(segments), List.copyOf(steps));
+    }
+
+    private String formatPathStep(PathStep step) {
+        if (step == null || step.kind() == PathStepKind.DIRECT_CHILD) {
+            return "/";
+        }
+        if (step.kind() == PathStepKind.ANY_DEPTH) {
+            return "//";
+        }
+        return "/" + step.depth() + "/";
+    }
+
+    private String insertLowercaseNodeSuffixHyphen(String value) {
+        if (value == null || value.isBlank() || value.contains("-")) {
+            return value;
+        }
+        List<String> suffixes = List.of(
+                "proposition",
+                "registration",
+                "definition",
+                "reference",
+                "statement",
+                "structure",
+                "attribute",
+                "relation",
+                "function",
+                "arguments",
+                "argument",
+                "selector",
+                "adjective",
+                "variable",
+                "variables",
+                "pattern",
+                "formula",
+                "cluster",
+                "functor",
+                "numeral",
+                "term",
+                "type",
+                "mode",
+                "item",
+                "block"
+        );
+        for (String suffix : suffixes) {
+            if (value.length() <= suffix.length() + 1) {
+                continue;
+            }
+            if (value.endsWith(suffix)) {
+                String prefix = value.substring(0, value.length() - suffix.length());
+                if (!prefix.isBlank()) {
+                    return prefix + "-" + suffix;
+                }
+            }
+        }
+        return value;
     }
 
     private String normalizeAttributeName(String raw) {
@@ -568,5 +822,28 @@ public class AstBuilder extends MmlQueryBaseVisitor<Object> {
     }
 
     private record PredicateAttributeData(String attributeName, String attributeValue, boolean negated) {
+    }
+
+    private record ParsedNodePath(List<String> segments, List<PathStep> steps) {
+    }
+
+    private record PathStep(PathStepKind kind, int depth) {
+        private static PathStep directChild() {
+            return new PathStep(PathStepKind.DIRECT_CHILD, 1);
+        }
+
+        private static PathStep anyDepth() {
+            return new PathStep(PathStepKind.ANY_DEPTH, -1);
+        }
+
+        private static PathStep exactDepth(int depth) {
+            return new PathStep(PathStepKind.EXACT_DEPTH, depth);
+        }
+    }
+
+    private enum PathStepKind {
+        DIRECT_CHILD,
+        ANY_DEPTH,
+        EXACT_DEPTH
     }
 }

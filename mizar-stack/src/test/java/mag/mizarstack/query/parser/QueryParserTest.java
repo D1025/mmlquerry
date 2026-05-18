@@ -150,6 +150,32 @@ class QueryParserTest {
     }
 
     @Test
+    void parsesNodeSelectionWithPathPredicateDirectAnyAndExactDepth() {
+        QueryNode node = parser.parseQuery(
+                "list of definition | nodes Item where has PatternShapedExpression/AttributePattern and has PatternShapedExpression//AttributePattern and has PatternShapedExpression/2/AttributePattern"
+        );
+
+        assertInstanceOf(OperationQueryNode.class, node);
+        OperationQueryNode operationQuery = (OperationQueryNode) node;
+        assertInstanceOf(NodeSelectionOperationNode.class, operationQuery.getOperation());
+
+        NodeSelectionOperationNode operation = (NodeSelectionOperationNode) operationQuery.getOperation();
+        assertEquals(3, operation.getDescendantPredicates().size());
+        assertEquals(
+                "pattern-shaped-expression/attribute-pattern",
+                operation.getDescendantPredicates().get(0).getNodeName()
+        );
+        assertEquals(
+                "pattern-shaped-expression//attribute-pattern",
+                operation.getDescendantPredicates().get(1).getNodeName()
+        );
+        assertEquals(
+                "pattern-shaped-expression/2/attribute-pattern",
+                operation.getDescendantPredicates().get(2).getNodeName()
+        );
+    }
+
+    @Test
     void parsesNodeSelectionWithHasAnyNodeNotSpellingShorthand() {
         QueryNode node = parser.parseQuery(
                 "list of definition | nodes Item where has * not spelling 'Noetherian'"
@@ -249,6 +275,17 @@ class QueryParserTest {
     }
 
     @Test
+    void parsesScopedPredicateWithNegatedAdjectiveShorthand() {
+        QueryNode node = parser.parseQuery(
+                "list of statement where proposition has negated adjective spelling 'empty'"
+        );
+
+        assertInstanceOf(SelectiveQueryNode.class, node);
+        SelectiveQueryNode selective = (SelectiveQueryNode) node;
+        assertTrue(selective.getCriterion().startsWith("NODE_HAS|scope=proposition|count=1|"));
+    }
+
+    @Test
     void parsesNodeSelectionWithRedefineTrueShorthand() {
         QueryNode node = parser.parseQuery(
                 "list of definition | nodes Item where redefine true and has *[spelling='Noetherian']"
@@ -263,6 +300,20 @@ class QueryParserTest {
         assertEquals("redefine", operation.getDescendantPredicates().get(0).getNodeName());
         assertEquals("occurs", operation.getDescendantPredicates().get(0).getAttributeName());
         assertEquals("true", operation.getDescendantPredicates().get(0).getAttributeValue());
+    }
+
+    @Test
+    void parsesNodeSelectionWithNegatedAdjectiveShorthand() {
+        QueryNode node = parser.parseQuery(
+                "list of statement | nodes Proposition where has negated adjective spelling 'empty'"
+        );
+
+        assertInstanceOf(OperationQueryNode.class, node);
+        OperationQueryNode operationQuery = (OperationQueryNode) node;
+        assertInstanceOf(NodeSelectionOperationNode.class, operationQuery.getOperation());
+
+        NodeSelectionOperationNode operation = (NodeSelectionOperationNode) operationQuery.getOperation();
+        assertEquals(1, operation.getDescendantPredicates().size());
     }
 
     @Test
@@ -295,6 +346,48 @@ class QueryParserTest {
         assertEquals(CardinalityComparator.GE, cardinality.getComparator());
         assertEquals(BasicOperationType.REF, cardinality.getOperationType());
         assertEquals(2, cardinality.getThreshold());
+    }
+
+    @Test
+    void parsesPipelineWithNodeCardinalityFilterDefaultScope() {
+        QueryNode node = parser.parseQuery("list of statement | wherege(numeralterm,3)");
+        assertInstanceOf(OperationQueryNode.class, node);
+
+        OperationQueryNode outer = (OperationQueryNode) node;
+        assertInstanceOf(NodeCardinalityFilterOperationNode.class, outer.getOperation());
+        NodeCardinalityFilterOperationNode cardinality =
+                (NodeCardinalityFilterOperationNode) outer.getOperation();
+        assertEquals(CardinalityComparator.GE, cardinality.getComparator());
+        assertEquals("item", cardinality.getScopeName());
+        assertEquals("numeral-term", cardinality.getNodeName());
+        assertEquals(3, cardinality.getThreshold());
+    }
+
+    @Test
+    void parsesPipelineWithNodeCardinalityFilterPropositionScope() {
+        QueryNode node = parser.parseQuery("list of statement | wherege(proposition:numeralterm,3)");
+        assertInstanceOf(OperationQueryNode.class, node);
+
+        OperationQueryNode outer = (OperationQueryNode) node;
+        assertInstanceOf(NodeCardinalityFilterOperationNode.class, outer.getOperation());
+        NodeCardinalityFilterOperationNode cardinality =
+                (NodeCardinalityFilterOperationNode) outer.getOperation();
+        assertEquals(CardinalityComparator.GE, cardinality.getComparator());
+        assertEquals("proposition", cardinality.getScopeName());
+        assertEquals("numeral-term", cardinality.getNodeName());
+        assertEquals(3, cardinality.getThreshold());
+    }
+
+    @Test
+    void parsesPipelineWithNumericValueFilter() {
+        QueryNode node = parser.parseQuery("list of statement | numgt(1000000)");
+        assertInstanceOf(OperationQueryNode.class, node);
+
+        OperationQueryNode outer = (OperationQueryNode) node;
+        assertInstanceOf(NumericValueFilterOperationNode.class, outer.getOperation());
+        NumericValueFilterOperationNode numeric = (NumericValueFilterOperationNode) outer.getOperation();
+        assertEquals(CardinalityComparator.GT, numeric.getComparator());
+        assertEquals(1_000_000L, numeric.getThreshold());
     }
 
     @Test

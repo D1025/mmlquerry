@@ -39,6 +39,8 @@ theoremInfixExpression
 scopedPredicate
     : scopeName HAS NOT? nodeName predicateAttribute?
     | scopeName NOT HAS nodeName predicateAttribute?
+    | scopeName HAS NOT? negatedAdjectiveClause
+    | scopeName NOT HAS negatedAdjectiveClause
     ;
 
 scopeName
@@ -47,13 +49,24 @@ scopeName
     ;
 
 nodeName
+    : simpleNodeName (pathConnector simpleNodeName)+
+    | simpleNodeName
+    | stringLiteral
+    ;
+
+simpleNodeName
     : NODE_NAME
     | ARTICLE_NAME
     | ITEM
     | PROPOSITION
     | SPELLING
     | STAR
-    | stringLiteral
+    ;
+
+pathConnector
+    : SLASH
+    | DOUBLE_SLASH
+    | SLASH NUMBER SLASH
     ;
 
 attributeName
@@ -123,6 +136,7 @@ operationExpression
     | NODES nodeSelector (WHERE nodeWherePredicate (AND nodeWherePredicate)*)? # opNodes
     | REVERSE                                     # opReverse
     | INVERT                                      # opInvert
+    | numericValueOperation                       # opNumericValue
     | cardinalityOperation                        # opCardinality
     ;
 
@@ -133,6 +147,12 @@ nodeSelector
 nodePredicate
     : HAS NOT? nodeName predicateAttribute?
     | NOT HAS nodeName predicateAttribute?
+    | HAS NOT? negatedAdjectiveClause
+    | NOT HAS negatedAdjectiveClause
+    ;
+
+negatedAdjectiveClause
+    : NEGATED ADJECTIVE spellingClause
     ;
 
 nodeWherePredicate
@@ -152,12 +172,25 @@ spellingPredicate
     : spellingClause
     ;
 
+numericValueOperation
+    : NUMEQ LPAREN NUMBER RPAREN   # opNumEq
+    | NUMGE LPAREN NUMBER RPAREN   # opNumGe
+    | NUMLE LPAREN NUMBER RPAREN   # opNumLe
+    | NUMGT LPAREN NUMBER RPAREN   # opNumGt
+    | NUMLT LPAREN NUMBER RPAREN   # opNumLt
+    ;
+
 cardinalityOperation
     : WHEREEQ LPAREN operationName COMMA NUMBER RPAREN   # opWhereEq
     | WHEREGE LPAREN operationName COMMA NUMBER RPAREN   # opWhereGe
     | WHERELE LPAREN operationName COMMA NUMBER RPAREN   # opWhereLe
     | WHEREGT LPAREN operationName COMMA NUMBER RPAREN   # opWhereGt
     | WHERELT LPAREN operationName COMMA NUMBER RPAREN   # opWhereLt
+    | WHEREEQ LPAREN nodeCardinalityTarget COMMA NUMBER RPAREN # opWhereNodeEq
+    | WHEREGE LPAREN nodeCardinalityTarget COMMA NUMBER RPAREN # opWhereNodeGe
+    | WHERELE LPAREN nodeCardinalityTarget COMMA NUMBER RPAREN # opWhereNodeLe
+    | WHEREGT LPAREN nodeCardinalityTarget COMMA NUMBER RPAREN # opWhereNodeGt
+    | WHERELT LPAREN nodeCardinalityTarget COMMA NUMBER RPAREN # opWhereNodeLt
     ;
 
 operationName
@@ -167,6 +200,10 @@ operationName
     | NOTATION
     | TERMTYPE REF
     | DEFTYPE REF
+    ;
+
+nodeCardinalityTarget
+    : (scopeName COLON)? nodeName
     ;
 
 stringLiteral
@@ -186,6 +223,8 @@ OR: O R;
 BUTNOT: B U T N O T;
 NOT: N O T;
 PIPE: '|';
+DOUBLE_SLASH: '//';
+SLASH: '/';
 STAR: '*';
 COMMA: ',';
 COLON: ':';
@@ -218,8 +257,15 @@ FILTER: F I L T E R;
 GREP: G R E P;
 NODES: N O D E S?;
 SPELLING: S P E L L I N G;
+NEGATED: N E G A T E D;
+ADJECTIVE: A D J E C T I V E;
 REVERSE: R E V E R S E;
 INVERT: I N V E R T;
+NUMEQ: N U M E Q;
+NUMGE: N U M G E;
+NUMLE: N U M L E;
+NUMGT: N U M G T;
+NUMLT: N U M L T;
 WHEREEQ: W H E R E E Q;
 WHEREGE: W H E R E G E;
 WHERELE: W H E R E L E;

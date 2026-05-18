@@ -9,8 +9,10 @@ import mag.mizarstack.query.ast.*;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
 
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 
@@ -20,6 +22,25 @@ import java.util.regex.PatternSyntaxException;
 public class QueryEvaluationService {
 
     private static final String SQL_LIKE_ESCAPE_CLAUSE = " escape '\\'";
+    private static final String PROPOSITION_PATH_REGEX = "^(.*/proposition\\[[0-9]+\\])";
+    private static final Pattern XML_OPEN_TAG_PATTERN = Pattern.compile(
+            "<\\s*([A-Za-z][A-Za-z0-9\\-]*)\\b([^<>]*)>",
+            Pattern.CASE_INSENSITIVE
+    );
+    private static final Pattern NUMBER_ATTRIBUTE_PATTERN = Pattern.compile(
+            "\\bnumber\\s*=\\s*\"([0-9]+)\"",
+            Pattern.CASE_INSENSITIVE
+    );
+    private static final Pattern SPELLING_ATTRIBUTE_PATTERN = Pattern.compile(
+            "\\bspelling\\s*=\\s*\"([^\"]*)\"",
+            Pattern.CASE_INSENSITIVE
+    );
+    private static final Pattern XML_ENTITY_NUMERIC_HEX_PATTERN = Pattern.compile("&#x([0-9a-fA-F]+);");
+    private static final Pattern XML_ENTITY_NUMERIC_DEC_PATTERN = Pattern.compile("&#([0-9]+);");
+    private static final String SYNTHETIC_NEGATED_ADJECTIVE_NODE = "__negated_adjective__";
+    private static final String ATTRIBUTE_TAG = "attribute";
+    private static final String ATTRIBUTE_KEY_NONOCC = "nonocc";
+    private static final String ATTRIBUTE_KEY_SPELLING = "spelling";
 
     private static final Map<String, List<String>> ATTRIBUTE_KEY_CANDIDATES = Map.ofEntries(
             Map.entry("absoluteconstrmmlid", List.of("absoluteconstrMMLId", "absoluteconstrmmlid")),
@@ -512,11 +533,17 @@ public class QueryEvaluationService {
         if (operation instanceof CardinalityFilterOperationNode node) {
             return extendedEvaluationService.applyCardinalityFilter(base, node);
         }
+        if (operation instanceof NodeCardinalityFilterOperationNode node) {
+            return applyNodeCardinalityFilter(base, node);
+        }
         if (operation instanceof FilterOperationNode node) {
             return applyFilter(base, node.getFilterCriteria());
         }
         if (operation instanceof GrepOperationNode node) {
             return applyGrep(base, node.getPattern());
+        }
+        if (operation instanceof NumericValueFilterOperationNode node) {
+            return applyNumericValueFilter(base, node);
         }
         if (operation instanceof NodeSelectionOperationNode node) {
             return applyNodeSelection(base, node);
@@ -577,6 +604,132 @@ public class QueryEvaluationService {
         return new QueryResult(filtered, "Grep applied");
     }
 
+    private QueryResult applyNumericValueFilter(QueryResult base, NumericValueFilterOperationNode operation) {
+        if (operation == null) {
+            return base;
+        }
+        BigInteger threshold = BigInteger.valueOf(operation.getThreshold());
+        BigInteger cap = threshold.add(BigInteger.ONE);
+
+        List<UUID> missingTextItemIds = base.getData().stream()
+                .filter(Objects::nonNull)
+                .filter(row -> extractRawText(row).isBlank())
+                .map(row -> asUuid(row.get("item_id")))
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
+
+        Map<UUID, String> rawXmlByItemId = loadItemRawXmlByIds(missingTextItemIds);
+
+        List<Map<String, Object>> filtered = base.getData().stream()
+                .filter(row -> {
+                    String text = extractRawText(row);
+                    if (text.isBlank()) {
+                        UUID itemId = asUuid(row.get("item_id"));
+                        if (itemId != null) {
+                            text = safeToString(rawXmlByItemId.get(itemId));
+                        }
+                    }
+                    return matchesNumericThreshold(text, operation.getComparator(), threshold, cap);
+                })
+                .toList();
+        return new QueryResult(
+                filtered,
+                "Numeric value filter " + operation.getComparator() + "(" + operation.getThreshold() + ")"
+        );
+    }
+
+    private QueryResult applyNodeCardinalityFilter(QueryResult base, NodeCardinalityFilterOperationNode operation) {
+        if (operation == null) {
+            return base;
+        }
+        List<UUID> itemIds = extractItemIds(base.getData());
+        if (itemIds.isEmpty()) {
+            return new QueryResult(List.of(), "No input items for node cardinality filter");
+        }
+
+        String scope = normalizeScopeName(operation.getScopeName());
+        if (scope.isBlank()) {
+            scope = "item";
+        }
+        if (!"item".equals(scope) && !"proposition".equals(scope)) {
+            throw new IllegalArgumentException("Unsupported scope in node cardinality filter: " + scope);
+        }
+
+        NodePredicate predicate = new NodePredicate(operation.getNodeName(), null, null, false);
+
+        StringBuilder sql = new StringBuilder("""
+                with base_items as (
+                    select cast(unnest(string_to_array(:itemIdsCsv, ',')) as uuid) as item_id
+                )
+                """);
+
+        if ("proposition".equals(scope)) {
+            String propositionPath = propositionPathExpression("n");
+            sql.append("""
+                    , proposition_counts as (
+                        select n.item_id,
+                    """);
+            sql.append("               ").append(propositionPath).append(" as proposition_path,\n");
+            sql.append("""
+                               count(*) as cnt
+                        from base_items bi
+                        join item_node n on n.item_id = bi.item_id
+                        where
+                    """);
+            sql.append("                        ")
+                    .append(propositionPath)
+                    .append(" is not null\n");
+            appendNodePredicateCondition(sql, predicate, "n", 0);
+            sql.append("\n                        group by n.item_id,\n");
+            sql.append("                                 ").append(propositionPath).append("\n");
+            sql.append("""
+                    )
+                    select item_id, max(cnt) as cnt
+                    from proposition_counts
+                    group by item_id
+                    """);
+        } else {
+            sql.append("""
+                    select n.item_id, count(*) as cnt
+                    from base_items bi
+                    join item_node n on n.item_id = bi.item_id
+                    where 1=1
+                    """);
+            appendNodePredicateCondition(sql, predicate, "n", 0);
+            sql.append("\ngroup by n.item_id");
+        }
+
+        Map<String, Object> params = new LinkedHashMap<>();
+        params.put("itemIdsCsv", toUuidCsv(itemIds));
+        putNodePredicateParams(params, predicate, 0);
+
+        List<Map<String, Object>> countRows = queryGenericRows(sql.toString(), params);
+        Map<UUID, Integer> countsByItem = new HashMap<>();
+        for (Map<String, Object> row : countRows) {
+            UUID itemId = asUuid(row.get("item_id"));
+            if (itemId == null) {
+                continue;
+            }
+            int count = ((Number) row.getOrDefault("cnt", 0)).intValue();
+            countsByItem.put(itemId, count);
+        }
+
+        List<Map<String, Object>> filtered = base.getData().stream()
+                .filter(row -> {
+                    UUID itemId = asUuid(row.get("item_id"));
+                    int value = itemId == null ? 0 : countsByItem.getOrDefault(itemId, 0);
+                    return compareCardinalityValue(value, operation.getThreshold(), operation.getComparator());
+                })
+                .toList();
+
+        return new QueryResult(
+                filtered,
+                "Node cardinality filter " + operation.getComparator()
+                        + "(" + scope + ":" + operation.getNodeName() + ", " + operation.getThreshold() + ")"
+        );
+    }
+
     private QueryResult applyNodeSelection(QueryResult base, NodeSelectionOperationNode operation) {
         if (operation == null || operation.getTarget() == null) {
             return base;
@@ -606,6 +759,7 @@ public class QueryEvaluationService {
                        n0.raw as raw_text,
                        coalesce(n0.details -> 'attrs' ->> 'kind', lower(coalesce(n0.details ->> 'tag', ''))) as node_type,
                        coalesce(n0.details -> 'attrs' ->> 'position', cast(n0.pos as text)) as text_position,
+                       trim(coalesce(n0.details -> 'attrs' ->> 'spelling', '')) as spelling,
                        n0.node_path,
                        lower(coalesce(n0.details ->> 'tag', '')) as node_tag,
                        n0.details -> 'attrs' ->> 'xmlid' as node_xmlid
@@ -743,6 +897,11 @@ public class QueryEvaluationService {
             return new QueryResult(List.of(), "No items to filter by scoped predicates");
         }
 
+        QueryResult optimizedResult = tryApplyOptimizedScopedPredicate(base, scope, predicates, description, itemIds);
+        if (optimizedResult != null) {
+            return optimizedResult;
+        }
+
         StringBuilder sql = new StringBuilder("""
                 with base_items as (
                     select cast(unnest(string_to_array(:itemIdsCsv, ',')) as uuid) as item_id
@@ -754,7 +913,7 @@ public class QueryEvaluationService {
                 """);
 
         if ("proposition".equals(scope)) {
-            sql.append("\n  and substring(n0.node_path from '^(.*/Proposition\\[[0-9]+\\])') is not null");
+            sql.append("\n  and ").append(propositionPathExpression("n0")).append(" is not null");
         }
 
         int anchorIndex = -1;
@@ -792,9 +951,11 @@ public class QueryEvaluationService {
                     .append(clauseIndex)
                     .append("\n      where n").append(clauseIndex).append(".item_id = n0.item_id");
             if ("proposition".equals(scope)) {
-                sql.append("\n        and substring(n").append(clauseIndex)
-                        .append(".node_path from '^(.*/Proposition\\[[0-9]+\\])') = ")
-                        .append("substring(n0.node_path from '^(.*/Proposition\\[[0-9]+\\])')");
+                String clauseAlias = "n" + clauseIndex;
+                sql.append("\n        and ")
+                        .append(propositionPathExpression(clauseAlias))
+                        .append(" = ")
+                        .append(propositionPathExpression("n0"));
             }
             if (requireDistinctNodes && !predicate.negated()) {
                 sql.append("\n        and n").append(clauseIndex).append(".id <> n0.id");
@@ -859,6 +1020,68 @@ public class QueryEvaluationService {
                 })
                 .toList();
 
+        return new QueryResult(deduplicate(rows), description);
+    }
+
+    private QueryResult tryApplyOptimizedScopedPredicate(
+            QueryResult base,
+            String scope,
+            List<PropositionPredicate> predicates,
+            String description,
+            List<UUID> itemIds
+    ) {
+        if (!"proposition".equals(scope) || predicates == null || predicates.size() != 1) {
+            return null;
+        }
+
+        PropositionPredicate predicate = predicates.get(0);
+        if (predicate == null || predicate.negated()) {
+            return null;
+        }
+
+        String normalizedNodeName = normalizeLookupValue(predicate.nodeName());
+        if (!SYNTHETIC_NEGATED_ADJECTIVE_NODE.equals(normalizedNodeName)) {
+            return null;
+        }
+
+        String normalizedSpelling = normalizeLookupValue(predicate.attributeValue());
+        if (normalizedSpelling.isBlank()) {
+            return null;
+        }
+
+        StringBuilder sql = new StringBuilder("""
+                with base_items as (
+                    select cast(unnest(string_to_array(:itemIdsCsv, ',')) as uuid) as item_id
+                )
+                select distinct n.item_id
+                from item_node n
+                join base_items bi on bi.item_id = n.item_id
+                where lower(coalesce(n.details ->> 'tag', '')) = 'attribute'
+                  and jsonb_exists(coalesce(n.details -> 'attrs', '{}'::jsonb), 'spelling')
+                  and lower(coalesce(n.details -> 'attrs' ->> 'nonocc', '')) = 'true'
+                  and strpos(lower(n.node_path), '/proposition[') > 0
+                """);
+
+        Map<String, Object> params = new LinkedHashMap<>();
+        params.put("itemIdsCsv", toUuidCsv(itemIds));
+        if (isPatternLikeValue(normalizedSpelling)) {
+            sql.append("\n  and lower(coalesce(n.details -> 'attrs' ->> 'spelling', ''))")
+                    .append(" like :negAdjFastSpellingPattern")
+                    .append(SQL_LIKE_ESCAPE_CLAUSE);
+            params.put("negAdjFastSpellingPattern", toSqlLikePattern(normalizedSpelling));
+        } else {
+            sql.append("\n  and lower(coalesce(n.details -> 'attrs' ->> 'spelling', '')) = :negAdjFastSpelling");
+            params.put("negAdjFastSpelling", unescapePatternLiterals(normalizedSpelling));
+        }
+
+        List<UUID> matchedIds = queryItemIds(sql.toString(), params);
+        Set<UUID> matched = new HashSet<>(matchedIds);
+        List<Map<String, Object>> rows = base.getData().stream()
+                .filter(row -> {
+                    UUID id = asUuid(row.get("item_id"));
+                    return id != null && matched.contains(id);
+                })
+                .toList();
         return new QueryResult(deduplicate(rows), description);
     }
 
@@ -1079,13 +1302,19 @@ public class QueryEvaluationService {
             int predicateIndex
     ) {
         String normalizedNodeName = normalizeLookupValue(predicate.getNodeName());
+        if (SYNTHETIC_NEGATED_ADJECTIVE_NODE.equals(normalizedNodeName)) {
+            appendNegatedAdjectiveCondition(sql, predicate, alias, predicateIndex);
+            return;
+        }
+
+        ParsedNodePath nodePath = parseNodePathExpression(normalizedNodeName);
+        if (nodePath != null) {
+            appendNodePathPredicateCondition(sql, predicate, alias, predicateIndex, nodePath);
+            return;
+        }
+
         if (!isWildcardNode(normalizedNodeName)) {
-            sql.append("\n    and lower(coalesce(").append(alias).append(".details ->> 'tag', ''))");
-            if (isPatternLikeValue(normalizedNodeName)) {
-                sql.append(" like :nodePattern").append(predicateIndex).append(SQL_LIKE_ESCAPE_CLAUSE);
-            } else {
-                sql.append(" = :node").append(predicateIndex);
-            }
+            appendNodeTagMatchCondition(sql, alias, normalizedNodeName, "node" + predicateIndex, "nodePattern" + predicateIndex);
         }
 
         if (predicate.getAttributeName() != null && !predicate.getAttributeName().isBlank()) {
@@ -1112,15 +1341,59 @@ public class QueryEvaluationService {
         );
     }
 
+    private void appendNegatedAdjectiveCondition(
+            StringBuilder sql,
+            NodePredicate predicate,
+            String alias,
+            int predicateIndex
+    ) {
+        sql.append("\n    and lower(coalesce(").append(alias).append(".details ->> 'tag', '')) = '")
+                .append(ATTRIBUTE_TAG)
+                .append("'");
+
+        appendKnownAttributeExists(sql, alias, List.of(ATTRIBUTE_KEY_NONOCC, ATTRIBUTE_KEY_SPELLING));
+        sql.append("\n    and lower(coalesce(").append(alias)
+                .append(".details -> 'attrs' ->> '").append(ATTRIBUTE_KEY_NONOCC)
+                .append("', '')) = 'true'");
+
+        String normalizedSpelling = normalizeLookupValue(predicate.getAttributeValue());
+        sql.append("\n    and lower(coalesce(").append(alias)
+                .append(".details -> 'attrs' ->> '").append(ATTRIBUTE_KEY_SPELLING)
+                .append("', ''))");
+        if (isPatternLikeValue(normalizedSpelling)) {
+            sql.append(" like :negAdjSpellingPattern").append(predicateIndex).append(SQL_LIKE_ESCAPE_CLAUSE);
+        } else {
+            sql.append(" = :negAdjSpelling").append(predicateIndex);
+        }
+    }
+
     private void putNodePredicateParams(Map<String, Object> params, NodePredicate predicate, int predicateIndex) {
         String normalizedNodeName = normalizeLookupValue(predicate.getNodeName());
-        if (!isWildcardNode(normalizedNodeName)) {
-            if (isPatternLikeValue(normalizedNodeName)) {
-                params.put("nodePattern" + predicateIndex, toSqlLikePattern(normalizedNodeName));
+        if (SYNTHETIC_NEGATED_ADJECTIVE_NODE.equals(normalizedNodeName)) {
+            String normalizedSpelling = normalizeLookupValue(predicate.getAttributeValue());
+            if (isPatternLikeValue(normalizedSpelling)) {
+                params.put("negAdjSpellingPattern" + predicateIndex, toSqlLikePattern(normalizedSpelling));
             } else {
-                params.put("node" + predicateIndex, unescapePatternLiterals(normalizedNodeName));
+                params.put("negAdjSpelling" + predicateIndex, unescapePatternLiterals(normalizedSpelling));
             }
+            return;
         }
+
+        ParsedNodePath nodePath = parseNodePathExpression(normalizedNodeName);
+        if (nodePath != null) {
+            for (int i = 0; i < nodePath.segments().size(); i++) {
+                String segment = nodePath.segments().get(i);
+                putNodeTagMatchParams(
+                        params,
+                        segment,
+                        "pathNode" + predicateIndex + "_" + i,
+                        "pathNodePattern" + predicateIndex + "_" + i
+                );
+            }
+        } else if (!isWildcardNode(normalizedNodeName)) {
+            putNodeTagMatchParams(params, normalizedNodeName, "node" + predicateIndex, "nodePattern" + predicateIndex);
+        }
+
         if (predicate.getAttributeName() != null && !predicate.getAttributeName().isBlank()) {
             String normalizedAttrName = normalizeLookupValue(predicate.getAttributeName());
             if (isPatternLikeValue(normalizedAttrName)) {
@@ -1141,6 +1414,175 @@ public class QueryEvaluationService {
 
     private boolean isWildcardNode(String nodeName) {
         return "*".equals(safeToString(nodeName).trim());
+    }
+
+    private void appendNodePathPredicateCondition(
+            StringBuilder sql,
+            NodePredicate predicate,
+            String alias,
+            int predicateIndex,
+            ParsedNodePath nodePath
+    ) {
+        if (nodePath == null || nodePath.segments().isEmpty()) {
+            return;
+        }
+
+        String firstSegment = normalizeLookupValue(nodePath.segments().get(0));
+        if (!isWildcardNode(firstSegment)) {
+            appendNodeTagMatchCondition(
+                    sql,
+                    alias,
+                    firstSegment,
+                    "pathNode" + predicateIndex + "_0",
+                    "pathNodePattern" + predicateIndex + "_0"
+            );
+        }
+
+        String currentAlias = alias;
+        for (int i = 0; i < nodePath.steps().size(); i++) {
+            NodePathStep step = nodePath.steps().get(i);
+            String nextAlias = alias + "_path" + predicateIndex + "_" + (i + 1);
+            String nextSegment = normalizeLookupValue(nodePath.segments().get(i + 1));
+
+            sql.append("\n    and exists (")
+                    .append("\n        select 1")
+                    .append("\n        from item_node ").append(nextAlias)
+                    .append("\n        where ").append(nextAlias).append(".item_id = ").append(currentAlias).append(".item_id")
+                    .append("\n          and ").append(nextAlias).append(".node_path like ").append(currentAlias).append(".node_path || '/%'");
+
+            if (step.kind() == NodePathStepKind.DIRECT_CHILD) {
+                sql.append("\n          and ")
+                        .append(nodeDepthExpression(nextAlias))
+                        .append(" - ")
+                        .append(nodeDepthExpression(currentAlias))
+                        .append(" = 1");
+            } else if (step.kind() == NodePathStepKind.EXACT_DEPTH) {
+                sql.append("\n          and ")
+                        .append(nodeDepthExpression(nextAlias))
+                        .append(" - ")
+                        .append(nodeDepthExpression(currentAlias))
+                        .append(" = ")
+                        .append(step.depth());
+            }
+
+            if (!isWildcardNode(nextSegment)) {
+                appendNodeTagMatchCondition(
+                        sql,
+                        nextAlias,
+                        nextSegment,
+                        "pathNode" + predicateIndex + "_" + (i + 1),
+                        "pathNodePattern" + predicateIndex + "_" + (i + 1)
+                );
+            }
+
+            if (i == nodePath.steps().size() - 1
+                    && predicate.getAttributeName() != null
+                    && !predicate.getAttributeName().isBlank()) {
+                appendNodeAttributeCondition(sql, predicate, nextAlias, predicateIndex);
+            }
+
+            currentAlias = nextAlias;
+        }
+
+        for (int i = 0; i < nodePath.steps().size(); i++) {
+            sql.append("\n    )");
+        }
+    }
+
+    private String nodeDepthExpression(String alias) {
+        return "(length(" + alias + ".node_path) - length(replace(" + alias + ".node_path, '/', '')))";
+    }
+
+    private void appendNodeTagMatchCondition(
+            StringBuilder sql,
+            String alias,
+            String normalizedNodeName,
+            String exactParamName,
+            String patternParamName
+    ) {
+        sql.append("\n    and lower(coalesce(").append(alias).append(".details ->> 'tag', ''))");
+        if (isPatternLikeValue(normalizedNodeName)) {
+            sql.append(" like :").append(patternParamName).append(SQL_LIKE_ESCAPE_CLAUSE);
+        } else {
+            sql.append(" = :").append(exactParamName);
+        }
+    }
+
+    private void putNodeTagMatchParams(
+            Map<String, Object> params,
+            String normalizedNodeName,
+            String exactParamName,
+            String patternParamName
+    ) {
+        if (isWildcardNode(normalizedNodeName)) {
+            return;
+        }
+        if (isPatternLikeValue(normalizedNodeName)) {
+            params.put(patternParamName, toSqlLikePattern(normalizedNodeName));
+        } else {
+            params.put(exactParamName, unescapePatternLiterals(normalizedNodeName));
+        }
+    }
+
+    private ParsedNodePath parseNodePathExpression(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        String text = raw.trim();
+        if (text.isEmpty() || !text.contains("/")) {
+            return null;
+        }
+
+        List<String> segments = new ArrayList<>();
+        List<NodePathStep> steps = new ArrayList<>();
+        int index = 0;
+        while (index < text.length()) {
+            int slashIndex = text.indexOf('/', index);
+            if (slashIndex < 0) {
+                String tail = text.substring(index).trim();
+                if (tail.isEmpty()) {
+                    return null;
+                }
+                segments.add(tail);
+                break;
+            }
+
+            String segment = text.substring(index, slashIndex).trim();
+            if (segment.isEmpty()) {
+                return null;
+            }
+            segments.add(segment);
+
+            if (slashIndex + 1 < text.length() && text.charAt(slashIndex + 1) == '/') {
+                steps.add(NodePathStep.anyDepth());
+                index = slashIndex + 2;
+                continue;
+            }
+
+            int cursor = slashIndex + 1;
+            int digitsStart = cursor;
+            while (cursor < text.length() && Character.isDigit(text.charAt(cursor))) {
+                cursor++;
+            }
+
+            if (cursor > digitsStart && cursor < text.length() && text.charAt(cursor) == '/') {
+                int depth = Integer.parseInt(text.substring(digitsStart, cursor));
+                if (depth <= 0) {
+                    return null;
+                }
+                steps.add(NodePathStep.exactDepth(depth));
+                index = cursor + 1;
+                continue;
+            }
+
+            steps.add(NodePathStep.directChild());
+            index = slashIndex + 1;
+        }
+
+        if (segments.size() < 2 || steps.size() != segments.size() - 1) {
+            return null;
+        }
+        return new ParsedNodePath(List.copyOf(segments), List.copyOf(steps));
     }
 
     private void appendNodeAttributeCondition(
@@ -1387,6 +1829,472 @@ public class QueryEvaluationService {
         regex.append(ch);
     }
 
+    private boolean matchesNumericThreshold(
+            String rawText,
+            CardinalityComparator comparator,
+            BigInteger threshold,
+            BigInteger cap
+    ) {
+        if (rawText == null || rawText.isBlank() || comparator == null || threshold == null || cap == null) {
+            return false;
+        }
+
+        if (looksLikeXml(rawText)) {
+            List<NumericToken> xmlTokens = tokenizeNumericFromXmlAttributes(rawText);
+            if (xmlTokens.isEmpty()) {
+                return false;
+            }
+            return matchesNumericThresholdStructured(xmlTokens, comparator, threshold, cap);
+        }
+
+        List<NumericToken> tokens = tokenizeNumeric(rawText);
+        if (tokens.isEmpty()) {
+            return false;
+        }
+
+        for (int i = 0; i < tokens.size(); i++) {
+            NumericToken token = tokens.get(i);
+            if (token.type() != NumericTokenType.NUMBER && token.type() != NumericTokenType.LPAREN) {
+                continue;
+            }
+            NumericParseResult parsed = parseNumericExpression(tokens, i, cap);
+            if (!parsed.success()) {
+                continue;
+            }
+            if (compareNumericValue(parsed.value(), threshold, comparator)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean matchesNumericThresholdStructured(
+            List<NumericToken> tokens,
+            CardinalityComparator comparator,
+            BigInteger threshold,
+            BigInteger cap
+    ) {
+        if (tokens == null || tokens.isEmpty()) {
+            return false;
+        }
+        for (int i = 0; i < tokens.size(); i++) {
+            NumericToken token = tokens.get(i);
+            if (token.type() != NumericTokenType.NUMBER
+                    && token.type() != NumericTokenType.PLUS
+                    && token.type() != NumericTokenType.MUL
+                    && token.type() != NumericTokenType.POW) {
+                continue;
+            }
+            NumericParseResult parsed = parsePrefixNumericExpression(tokens, i, cap);
+            if (!parsed.success()) {
+                continue;
+            }
+            if (compareNumericValue(parsed.value(), threshold, comparator)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private NumericParseResult parseNumericExpression(List<NumericToken> tokens, int startIndex, BigInteger cap) {
+        NumericExpressionParser parser = new NumericExpressionParser(tokens, startIndex, cap);
+        return parser.parseExpression();
+    }
+
+    private List<NumericToken> tokenizeNumeric(String rawText) {
+        if (rawText == null || rawText.isBlank()) {
+            return List.of();
+        }
+        List<NumericToken> tokens = new ArrayList<>();
+        int i = 0;
+        while (i < rawText.length()) {
+            char ch = rawText.charAt(i);
+            if (Character.isDigit(ch)) {
+                int start = i;
+                while (i < rawText.length() && Character.isDigit(rawText.charAt(i))) {
+                    i++;
+                }
+                tokens.add(new NumericToken(NumericTokenType.NUMBER, rawText.substring(start, i)));
+                continue;
+            }
+            if (ch == '|' && i + 1 < rawText.length() && rawText.charAt(i + 1) == '^') {
+                tokens.add(new NumericToken(NumericTokenType.POW, "|^"));
+                i += 2;
+                continue;
+            }
+            switch (ch) {
+                case '+' -> tokens.add(new NumericToken(NumericTokenType.PLUS, "+"));
+                case '*' -> tokens.add(new NumericToken(NumericTokenType.MUL, "*"));
+                case '(' -> tokens.add(new NumericToken(NumericTokenType.LPAREN, "("));
+                case ')' -> tokens.add(new NumericToken(NumericTokenType.RPAREN, ")"));
+                case '=' -> tokens.add(new NumericToken(NumericTokenType.EQ, "="));
+                case '<' -> tokens.add(new NumericToken(NumericTokenType.LT, "<"));
+                case '>' -> tokens.add(new NumericToken(NumericTokenType.GT, ">"));
+                default -> {
+                    i++;
+                    continue;
+                }
+            }
+            i++;
+        }
+        return tokens;
+    }
+
+    private List<NumericToken> tokenizeNumericFromXmlAttributes(String rawText) {
+        if (rawText == null || rawText.isBlank()) {
+            return List.of();
+        }
+        List<NumericToken> tokens = new ArrayList<>();
+        Matcher tagMatcher = XML_OPEN_TAG_PATTERN.matcher(rawText);
+        while (tagMatcher.find()) {
+            String attrs = safeToString(tagMatcher.group(2));
+            Matcher numberMatcher = NUMBER_ATTRIBUTE_PATTERN.matcher(attrs);
+            while (numberMatcher.find()) {
+                tokens.add(new NumericToken(NumericTokenType.NUMBER, numberMatcher.group(1)));
+            }
+
+            Matcher spellingMatcher = SPELLING_ATTRIBUTE_PATTERN.matcher(attrs);
+            while (spellingMatcher.find()) {
+                String spelling = decodeXmlAttributeValue(spellingMatcher.group(1)).trim();
+                NumericTokenType operatorType = numericOperatorTypeFromSpelling(spelling);
+                if (operatorType != null) {
+                    tokens.add(new NumericToken(operatorType, spelling));
+                }
+            }
+        }
+        return tokens;
+    }
+
+    private NumericTokenType numericOperatorTypeFromSpelling(String spellingRaw) {
+        String spelling = safeToString(spellingRaw).trim();
+        return switch (spelling) {
+            case "+" -> NumericTokenType.PLUS;
+            case "*" -> NumericTokenType.MUL;
+            case "|^" -> NumericTokenType.POW;
+            case "=" -> NumericTokenType.EQ;
+            case "<" -> NumericTokenType.LT;
+            case ">" -> NumericTokenType.GT;
+            default -> null;
+        };
+    }
+
+    private String decodeXmlAttributeValue(String raw) {
+        if (raw == null || raw.isEmpty()) {
+            return "";
+        }
+        String out = raw
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&amp;", "&")
+                .replace("&quot;", "\"")
+                .replace("&apos;", "'");
+
+        Matcher hexMatcher = XML_ENTITY_NUMERIC_HEX_PATTERN.matcher(out);
+        StringBuffer hexBuffer = new StringBuffer();
+        while (hexMatcher.find()) {
+            String replacement = numericEntityToChar(hexMatcher.group(1), 16);
+            hexMatcher.appendReplacement(hexBuffer, Matcher.quoteReplacement(replacement));
+        }
+        hexMatcher.appendTail(hexBuffer);
+        out = hexBuffer.toString();
+
+        Matcher decMatcher = XML_ENTITY_NUMERIC_DEC_PATTERN.matcher(out);
+        StringBuffer decBuffer = new StringBuffer();
+        while (decMatcher.find()) {
+            String replacement = numericEntityToChar(decMatcher.group(1), 10);
+            decMatcher.appendReplacement(decBuffer, Matcher.quoteReplacement(replacement));
+        }
+        decMatcher.appendTail(decBuffer);
+        return decBuffer.toString();
+    }
+
+    private String numericEntityToChar(String codeRaw, int radix) {
+        if (codeRaw == null || codeRaw.isBlank()) {
+            return "";
+        }
+        try {
+            int codePoint = Integer.parseInt(codeRaw, radix);
+            if (!Character.isValidCodePoint(codePoint)) {
+                return "";
+            }
+            return new String(Character.toChars(codePoint));
+        } catch (NumberFormatException ex) {
+            return "";
+        }
+    }
+
+    private boolean looksLikeXml(String rawText) {
+        if (rawText == null || rawText.isBlank()) {
+            return false;
+        }
+        int start = rawText.indexOf('<');
+        int end = rawText.indexOf('>');
+        return start >= 0 && end > start;
+    }
+
+    private NumericParseResult parsePrefixNumericExpression(
+            List<NumericToken> tokens,
+            int startIndex,
+            BigInteger cap
+    ) {
+        if (tokens == null || startIndex < 0 || startIndex >= tokens.size()) {
+            return NumericParseResult.failure(startIndex);
+        }
+        NumericToken token = tokens.get(startIndex);
+        if (token.type() == NumericTokenType.NUMBER) {
+            try {
+                BigInteger value = new BigInteger(token.text());
+                return new NumericParseResult(true, clampToCap(value, cap), startIndex + 1, 0);
+            } catch (NumberFormatException ex) {
+                return NumericParseResult.failure(startIndex);
+            }
+        }
+        if (token.type() != NumericTokenType.PLUS
+                && token.type() != NumericTokenType.MUL
+                && token.type() != NumericTokenType.POW) {
+            return NumericParseResult.failure(startIndex);
+        }
+
+        NumericParseResult left = parsePrefixNumericExpression(tokens, startIndex + 1, cap);
+        if (!left.success()) {
+            return NumericParseResult.failure(startIndex);
+        }
+        NumericParseResult right = parsePrefixNumericExpression(tokens, left.nextIndex(), cap);
+        if (!right.success()) {
+            return NumericParseResult.failure(startIndex);
+        }
+
+        BigInteger value = switch (token.type()) {
+            case PLUS -> addWithCap(left.value(), right.value(), cap);
+            case MUL -> multiplyWithCap(left.value(), right.value(), cap);
+            case POW -> powWithCap(left.value(), right.value(), cap);
+            default -> BigInteger.ZERO;
+        };
+        return new NumericParseResult(
+                true,
+                value,
+                right.nextIndex(),
+                left.operatorCount() + right.operatorCount() + 1
+        );
+    }
+
+    private BigInteger clampToCap(BigInteger value, BigInteger cap) {
+        if (value.compareTo(cap) > 0) {
+            return cap;
+        }
+        return value;
+    }
+
+    private BigInteger addWithCap(BigInteger left, BigInteger right, BigInteger cap) {
+        if (left.compareTo(cap) >= 0 || right.compareTo(cap) >= 0) {
+            return cap;
+        }
+        BigInteger result = left.add(right);
+        return clampToCap(result, cap);
+    }
+
+    private BigInteger multiplyWithCap(BigInteger left, BigInteger right, BigInteger cap) {
+        if (left.signum() == 0 || right.signum() == 0) {
+            return BigInteger.ZERO;
+        }
+        if (left.compareTo(cap) >= 0 || right.compareTo(cap) >= 0) {
+            return cap;
+        }
+        BigInteger result = left.multiply(right);
+        return clampToCap(result, cap);
+    }
+
+    private BigInteger powWithCap(BigInteger base, BigInteger exponent, BigInteger cap) {
+        if (exponent.signum() < 0) {
+            return BigInteger.ZERO;
+        }
+        if (exponent.signum() == 0) {
+            return BigInteger.ONE;
+        }
+        if (base.signum() == 0) {
+            return BigInteger.ZERO;
+        }
+        if (base.equals(BigInteger.ONE)) {
+            return BigInteger.ONE;
+        }
+        if (base.compareTo(cap) >= 0) {
+            return cap;
+        }
+
+        BigInteger result = BigInteger.ONE;
+        BigInteger remaining = exponent;
+        while (remaining.signum() > 0) {
+            result = multiplyWithCap(result, base, cap);
+            if (result.compareTo(cap) >= 0) {
+                return cap;
+            }
+            remaining = remaining.subtract(BigInteger.ONE);
+        }
+        return result;
+    }
+
+    private boolean compareNumericValue(BigInteger value, BigInteger threshold, CardinalityComparator comparator) {
+        int cmp = value.compareTo(threshold);
+        return switch (comparator) {
+            case EQ -> cmp == 0;
+            case GE -> cmp >= 0;
+            case LE -> cmp <= 0;
+            case GT -> cmp > 0;
+            case LT -> cmp < 0;
+        };
+    }
+
+    private boolean compareCardinalityValue(int value, int threshold, CardinalityComparator comparator) {
+        return switch (comparator) {
+            case EQ -> value == threshold;
+            case GE -> value >= threshold;
+            case LE -> value <= threshold;
+            case GT -> value > threshold;
+            case LT -> value < threshold;
+        };
+    }
+
+    private enum NumericTokenType {
+        NUMBER,
+        PLUS,
+        MUL,
+        POW,
+        LPAREN,
+        RPAREN,
+        EQ,
+        LT,
+        GT
+    }
+
+    private record NumericToken(NumericTokenType type, String text) {
+    }
+
+    private record NumericParseResult(boolean success, BigInteger value, int nextIndex, int operatorCount) {
+        static NumericParseResult failure(int index) {
+            return new NumericParseResult(false, BigInteger.ZERO, index, 0);
+        }
+    }
+
+    private final class NumericExpressionParser {
+        private final List<NumericToken> tokens;
+        private final BigInteger cap;
+        private int index;
+
+        private NumericExpressionParser(List<NumericToken> tokens, int startIndex, BigInteger cap) {
+            this.tokens = tokens;
+            this.cap = cap;
+            this.index = startIndex;
+        }
+
+        private NumericParseResult parseExpression() {
+            return parseAdditive();
+        }
+
+        private NumericParseResult parseAdditive() {
+            int start = index;
+            NumericParseResult left = parseMultiplicative();
+            if (!left.success()) {
+                index = start;
+                return NumericParseResult.failure(start);
+            }
+            BigInteger value = left.value();
+            int operators = left.operatorCount();
+
+            while (index < tokens.size() && tokens.get(index).type() == NumericTokenType.PLUS) {
+                index++;
+                NumericParseResult right = parseMultiplicative();
+                if (!right.success()) {
+                    index = start;
+                    return NumericParseResult.failure(start);
+                }
+                value = addWithCap(value, right.value(), cap);
+                operators += right.operatorCount() + 1;
+            }
+
+            return new NumericParseResult(true, value, index, operators);
+        }
+
+        private NumericParseResult parseMultiplicative() {
+            int start = index;
+            NumericParseResult left = parsePower();
+            if (!left.success()) {
+                index = start;
+                return NumericParseResult.failure(start);
+            }
+            BigInteger value = left.value();
+            int operators = left.operatorCount();
+
+            while (index < tokens.size() && tokens.get(index).type() == NumericTokenType.MUL) {
+                index++;
+                NumericParseResult right = parsePower();
+                if (!right.success()) {
+                    index = start;
+                    return NumericParseResult.failure(start);
+                }
+                value = multiplyWithCap(value, right.value(), cap);
+                operators += right.operatorCount() + 1;
+            }
+
+            return new NumericParseResult(true, value, index, operators);
+        }
+
+        private NumericParseResult parsePower() {
+            int start = index;
+            NumericParseResult left = parseFactor();
+            if (!left.success()) {
+                index = start;
+                return NumericParseResult.failure(start);
+            }
+            BigInteger value = left.value();
+            int operators = left.operatorCount();
+
+            while (index < tokens.size() && tokens.get(index).type() == NumericTokenType.POW) {
+                index++;
+                NumericParseResult right = parseFactor();
+                if (!right.success()) {
+                    index = start;
+                    return NumericParseResult.failure(start);
+                }
+                value = powWithCap(value, right.value(), cap);
+                operators += right.operatorCount() + 1;
+            }
+
+            return new NumericParseResult(true, value, index, operators);
+        }
+
+        private NumericParseResult parseFactor() {
+            if (index >= tokens.size()) {
+                return NumericParseResult.failure(index);
+            }
+            NumericToken token = tokens.get(index);
+            if (token.type() == NumericTokenType.NUMBER) {
+                index++;
+                try {
+                    BigInteger value = new BigInteger(token.text());
+                    return new NumericParseResult(true, clampToCap(value, cap), index, 0);
+                } catch (NumberFormatException ex) {
+                    return NumericParseResult.failure(index);
+                }
+            }
+            if (token.type() == NumericTokenType.LPAREN) {
+                int start = index;
+                index++;
+                NumericParseResult inner = parseAdditive();
+                if (!inner.success()) {
+                    index = start;
+                    return NumericParseResult.failure(start);
+                }
+                if (index >= tokens.size() || tokens.get(index).type() != NumericTokenType.RPAREN) {
+                    index = start;
+                    return NumericParseResult.failure(start);
+                }
+                index++;
+                return new NumericParseResult(true, inner.value(), index, inner.operatorCount());
+            }
+            return NumericParseResult.failure(index);
+        }
+    }
+
     private String decodeCriterionPart(String raw) {
         if (raw == null) {
             return null;
@@ -1414,6 +2322,10 @@ public class QueryEvaluationService {
             return "";
         }
         return raw.trim().toLowerCase(Locale.ROOT);
+    }
+
+    private String propositionPathExpression(String alias) {
+        return "substring(lower(" + alias + ".node_path) from '" + PROPOSITION_PATH_REGEX + "')";
     }
 
     private String normalizeSource(QuerySource source) {
@@ -1511,6 +2423,36 @@ public class QueryEvaluationService {
                 .orElse(0);
     }
 
+    private Map<UUID, String> loadItemRawXmlByIds(List<UUID> itemIds) {
+        if (itemIds == null || itemIds.isEmpty()) {
+            return Map.of();
+        }
+        String itemIdsCsv = toUuidCsv(itemIds);
+        if (itemIdsCsv.isBlank()) {
+            return Map.of();
+        }
+
+        String sql = """
+                with ids as (
+                    select cast(unnest(string_to_array(:itemIdsCsv, ',')) as uuid) as item_id
+                )
+                select mi.id as item_id,
+                       mi.raw_xml
+                from ids
+                join mml_item mi on mi.id = ids.item_id
+                """;
+        List<Map<String, Object>> rows = queryGenericRows(sql, Map.of("itemIdsCsv", itemIdsCsv));
+        Map<UUID, String> out = new HashMap<>();
+        for (Map<String, Object> row : rows) {
+            UUID itemId = asUuid(row.get("item_id"));
+            String rawXml = safeToString(row.get("raw_xml"));
+            if (itemId != null && !rawXml.isBlank()) {
+                out.put(itemId, rawXml);
+            }
+        }
+        return out;
+    }
+
     private List<UUID> queryItemIds(String sql, Map<String, Object> params) {
         JdbcClient.StatementSpec spec = jdbcClient.sql(sql);
         for (Map.Entry<String, Object> entry : params.entrySet()) {
@@ -1540,6 +2482,29 @@ public class QueryEvaluationService {
             String attributeValue,
             boolean negated
     ) {
+    }
+
+    private record ParsedNodePath(List<String> segments, List<NodePathStep> steps) {
+    }
+
+    private record NodePathStep(NodePathStepKind kind, int depth) {
+        private static NodePathStep directChild() {
+            return new NodePathStep(NodePathStepKind.DIRECT_CHILD, 1);
+        }
+
+        private static NodePathStep anyDepth() {
+            return new NodePathStep(NodePathStepKind.ANY_DEPTH, -1);
+        }
+
+        private static NodePathStep exactDepth(int depth) {
+            return new NodePathStep(NodePathStepKind.EXACT_DEPTH, depth);
+        }
+    }
+
+    private enum NodePathStepKind {
+        DIRECT_CHILD,
+        ANY_DEPTH,
+        EXACT_DEPTH
     }
 
     private record PagedListPlan(
