@@ -101,6 +101,50 @@ cd mizar-stack
 java -jar build/libs/mizar-stack-0.1.0.jar
 ```
 
+### Frontend (Docker + HTTPS na IP)
+
+Frontend jest budowany jako statyczny bundle Vite i serwowany przez `nginx`.
+W `docker compose` skonfigurowane jest:
+
+- HTTP `:8081` z przekierowaniem do HTTPS
+- HTTPS `:8443`
+- reverse proxy `/api/* -> app:8080/*`
+- self-signed cert generowany przy starcie kontenera dla wskazanego adresu IP
+
+Ustawienia w `.env`:
+
+```env
+FRONTEND_HTTP_PORT=8081
+FRONTEND_HTTPS_PORT=8443
+FRONTEND_API_BASE_URL=/api
+FRONTEND_SSL_IP=127.0.0.1
+FRONTEND_SSL_DAYS=825
+ADMIN_PASSWORD=changeme-admin
+```
+
+Uruchomienie:
+
+```bash
+docker compose up -d frontend
+```
+
+Przy pierwszym uruchomieniu certyfikat jest tworzony automatycznie w wolumenie `frontend-certs`.
+W przegladarce self-signed bedzie oznaczony jako niezaufany, dopoki nie dodasz go recznie do zaufanych certyfikatow.
+
+### Panel admina
+
+- W naglowku frontendu dostepna jest zakladka `Admin`.
+- Haslo administratora ustawiasz po stronie backendu przez `ADMIN_PASSWORD` w `.env`.
+- Frontend hashuje wpisane haslo (SHA-256) i wysyla hash w naglowku `Authorization`.
+- Zabezpieczone endpointy:
+  - `/ingest/*`
+  - `/admin/*`
+- Z panelu admina mozna uruchomic:
+  - pobranie zasobow do S3,
+  - indeksowanie wskazanego prefixu S3,
+  - pelny ingest (download + index).
+- Logi postepu operacji sa odswiezane na zywo w panelu.
+
 ### Application Properties
 
 ```properties

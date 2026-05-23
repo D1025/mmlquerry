@@ -29,6 +29,7 @@ import java.security.MessageDigest;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
+import java.util.function.Consumer;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
@@ -96,10 +97,17 @@ public class IngestService {
      * Returns the S3 prefix where files were uploaded.
      */
     public DownloadResult downloadLatestReleaseToS3() {
+        return downloadLatestReleaseToS3(null);
+    }
+
+    public DownloadResult downloadLatestReleaseToS3(Consumer<String> progress) {
         Instant start = Instant.now();
         log.info("=== Starting GitHub Release Download ===");
         log.info("Repository: {}", ghRepo);
         log.info("Bucket: {}", bucket);
+        emit(progress, "Starting GitHub release download.");
+        emit(progress, "Repository: " + ghRepo);
+        emit(progress, "Bucket: " + bucket);
 
         if (ghRepo == null || ghRepo.isBlank()) {
             throw new IllegalStateException("GitHub repository not configured (app.github.repo)");
@@ -131,9 +139,11 @@ public class IngestService {
             }
 
             log.info("Found release: {} (tag: {})", releaseName, tagName);
+            emit(progress, "Found release: " + releaseName + " (tag: " + tagName + ")");
 
             String s3Prefix = "mizar-esx/releases/%s".formatted(tagName);
             log.info("S3 prefix will be: {}", s3Prefix);
+            emit(progress, "S3 prefix: " + s3Prefix);
 
             HttpResponse<InputStream> zipResp = downloadZipball(tagName);
             
@@ -171,6 +181,7 @@ public class IngestService {
                         
                         if (body == null || body.length == 0) {
                             log.warn("Empty file: {}", rel);
+                            emit(progress, "Skipped empty file: " + rel);
                             zis.closeEntry();
                             continue;
                         }
@@ -192,10 +203,12 @@ public class IngestService {
 
                         if (filesUploaded % 100 == 0) {
                             log.info("  Uploaded {} files...", filesUploaded);
+                            emit(progress, "Uploaded files: " + filesUploaded);
                         }
 
                     } catch (Exception ex) {
                         log.error("Failed to upload {}: {}", rel, ex.getMessage());
+                        emit(progress, "Failed upload: " + rel + " (" + ex.getMessage() + ")");
                     } finally {
                         zis.closeEntry();
                     }
@@ -210,11 +223,16 @@ public class IngestService {
             log.info("Bytes:         {}", formatBytes(bytesUploaded));
             log.info("S3 Prefix:     {}", s3Prefix);
             log.info("Duration:      {}", formatDuration(elapsed));
+            emit(progress, "Download complete.");
+            emit(progress, "Files uploaded: " + filesUploaded);
+            emit(progress, "Bytes uploaded: " + formatBytes(bytesUploaded));
+            emit(progress, "Duration: " + formatDuration(elapsed));
 
             return new DownloadResult(tagName, s3Prefix, filesUploaded, bytesUploaded, elapsed);
 
         } catch (Exception ex) {
             log.error("Download failed: {}", ex.getMessage(), ex);
+            emit(progress, "Download failed: " + ex.getMessage());
             throw new RuntimeException("Failed to download release", ex);
         }
     }
@@ -237,20 +255,28 @@ public class IngestService {
      * Progress is printed to the console.
      */
     public IndexResult indexS3Prefix(String s3Prefix) {
+        return indexS3Prefix(s3Prefix, null);
+    }
+
+    public IndexResult indexS3Prefix(String s3Prefix, Consumer<String> progress) {
         Instant start = Instant.now();
 
         if (s3Prefix.contains("mizar-esx/mizar-esx/")) {
             log.warn("Detected duplicate 'mizar-esx' in prefix, auto-deduplicating");
             s3Prefix = s3Prefix.replace("mizar-esx/mizar-esx/", "mizar-esx/");
             log.info("Corrected prefix: {}", s3Prefix);
+            emit(progress, "Corrected duplicate prefix to: " + s3Prefix);
         }
         
         log.info("=== Starting S3 Indexing to mizar_schema ===");
         log.info("Bucket: {}", bucket);
         log.info("Prefix: {}", s3Prefix);
+        emit(progress, "Starting indexing for prefix: " + s3Prefix);
+        emit(progress, "Bucket: " + bucket);
 
         Long runId = ingestRunDao.create();
         log.info("Created ingest run ID: {}", runId);
+        emit(progress, "Created ingest run ID: " + runId);
 
         int seen = 0;
         int processed = 0;
@@ -280,14 +306,16 @@ public class IngestService {
 
             seen = esxKeys.size();
             log.info("Discovered ESX files: {}", seen);
+            emit(progress, "Discovered ESX files: " + seen);
 
             for (int i = 0; i < esxKeys.size(); i++) {
                 String key = esxKeys.get(i);
                 int current = i + 1;
                 log.info("[{}/{}] START {}", current, seen, key);
+                emit(progress, "[" + current + "/" + seen + "] START " + key);
 
                 try {
-                    IndexFileResult result = indexSingleS3File(key, current, seen);
+                    IndexFileResult result = indexSingleS3File(key, current, seen, progress);
 
                     if (result.isNewVersion()) {
                         newVersions++;
@@ -297,18 +325,27 @@ public class IngestService {
                     processed++;
                     log.info("[{}/{}] DONE {} | bytes={} | newVersion={}",
                             current, seen, key, formatBytes(result.sizeBytes()), result.isNewVersion());
+                    emit(progress, "[" + current + "/" + seen + "] DONE " + key
+                            + " | bytes=" + formatBytes(result.sizeBytes())
+                            + " | newVersion=" + result.isNewVersion());
                 } catch (Exception ex) {
                     failed++;
                     log.error("[{}/{}] FAILED {}", current, seen, key, ex);
+                    emit(progress, "[" + current + "/" + seen + "] FAILED " + key + " (" + ex.getMessage() + ")");
                 }
             }
 
-            Map<String, Integer> deferredFlush = esxMapper.flushDeferredRelations(message ->
-                    log.info("[deferred-relations] {}", message));
+            Map<String, Integer> deferredFlush = esxMapper.flushDeferredRelations(message -> {
+                log.info("[deferred-relations] {}", message);
+                emit(progress, "[deferred-relations] " + message);
+            });
             log.info("Deferred relations flush summary: resolved={} remaining={} passes={}",
                     deferredFlush.getOrDefault("resolved", 0),
                     deferredFlush.getOrDefault("remaining", 0),
                     deferredFlush.getOrDefault("passes", 0));
+            emit(progress, "Deferred relations: resolved=" + deferredFlush.getOrDefault("resolved", 0)
+                    + ", remaining=" + deferredFlush.getOrDefault("remaining", 0)
+                    + ", passes=" + deferredFlush.getOrDefault("passes", 0));
 
             // Update ingest run with final statistics
             ingestRunDao.complete(runId, seen, processed, newVersions, totalBytes);
@@ -322,11 +359,16 @@ public class IngestService {
             log.info("Files failed:    {}", failed);
             log.info("Total bytes:     {}", formatBytes(totalBytes));
             log.info("Duration:        {}", formatDuration(elapsed));
+            emit(progress, "Indexing complete.");
+            emit(progress, "Files seen: " + seen + ", processed: " + processed + ", failed: " + failed);
+            emit(progress, "New versions: " + newVersions + ", total bytes: " + formatBytes(totalBytes));
+            emit(progress, "Duration: " + formatDuration(elapsed));
 
             return new IndexResult(runId, seen, processed, newVersions, failed, totalBytes, elapsed);
 
         } catch (Exception ex) {
             log.error("Fatal error during indexing: {}", ex.getMessage(), ex);
+            emit(progress, "Fatal indexing error: " + ex.getMessage());
             ingestRunDao.complete(runId, seen, processed, newVersions, totalBytes);
             throw new RuntimeException("Indexing failed", ex);
         }
@@ -335,7 +377,7 @@ public class IngestService {
     /**
      * Index a single S3 file: create document version and parse to mizar_schema.
      */
-    private IndexFileResult indexSingleS3File(String s3Key, int currentFile, int totalFiles) throws Exception {
+    private IndexFileResult indexSingleS3File(String s3Key, int currentFile, int totalFiles, Consumer<String> progress) throws Exception {
         GetObjectRequest req = GetObjectRequest.builder()
                 .bucket(bucket)
                 .key(s3Key)
@@ -360,7 +402,7 @@ public class IngestService {
         Optional<Long> existingVersionId = documentVersionDao.findIdByDocumentIdAndSha256(docId, sha256);
         
         if (existingVersionId.isPresent()) {
-            parseAndMapToMizarSchema(body, s3Key, currentFile, totalFiles);
+            parseAndMapToMizarSchema(body, s3Key, currentFile, totalFiles, progress);
             return new IndexFileResult(docId, existingVersionId.get(), false, body.length);
         }
 
@@ -375,7 +417,7 @@ public class IngestService {
 
         documentHeadDao.upsert(docId, versionId);
 
-        parseAndMapToMizarSchema(body, s3Key, currentFile, totalFiles);
+        parseAndMapToMizarSchema(body, s3Key, currentFile, totalFiles, progress);
 
         return new IndexFileResult(docId, versionId, true, body.length);
     }
@@ -383,7 +425,7 @@ public class IngestService {
     /**
      * Parse ESX XML and map to mizar_schema tables (article, mml_item, statement/notation/registration, item_node, etc.)
      */
-    private void parseAndMapToMizarSchema(byte[] body, String s3Key, int currentFile, int totalFiles) {
+    private void parseAndMapToMizarSchema(byte[] body, String s3Key, int currentFile, int totalFiles, Consumer<String> progress) {
         Instant mapStart = Instant.now();
         try {
             Map<String, Object> parseResult = esxMapper.processArticleXml(body, s3Key, message -> {
@@ -392,6 +434,7 @@ public class IngestService {
                         || message.startsWith("Resolved relations:")
                         || message.startsWith("Mapper workers timeout")) {
                     log.info("[{}/{}] {} :: {}", currentFile, totalFiles, s3Key, message);
+                    emit(progress, "[" + currentFile + "/" + totalFiles + "] " + s3Key + " :: " + message);
                 }
             });
             int processedItems = toInt(parseResult.get("processedItems"));
@@ -410,8 +453,14 @@ public class IngestService {
                     formatItemNodeLinkCounts(insertedCounts),
                     formatInsertedCounts(insertedCounts),
                     formatDuration(mapDuration));
+            emit(progress, "[" + currentFile + "/" + totalFiles + "] MAPPED " + s3Key
+                    + " | items=" + processedItems
+                    + " | failedItems=" + failedItems
+                    + " | pendingRefs=" + pendingRefs
+                    + " | duration=" + formatDuration(mapDuration));
         } catch (Exception ex) {
             log.warn("[{}/{}] ESX parsing warning for {}", currentFile, totalFiles, s3Key, ex);
+            emit(progress, "[" + currentFile + "/" + totalFiles + "] parsing warning for " + s3Key + ": " + ex.getMessage());
         }
     }
 
@@ -431,11 +480,18 @@ public class IngestService {
      * @return FullIngestResult with both download and index statistics
      */
     public FullIngestResult downloadAndIndex() {
-        log.info("=== Full Ingest: Download + Index ===");
+        return downloadAndIndex(null);
+    }
 
-        DownloadResult downloadResult = downloadLatestReleaseToS3();
+    public FullIngestResult downloadAndIndex(Consumer<String> progress) {
+        log.info("=== Full Ingest: Download + Index ===");
+        emit(progress, "Starting full ingest: download + index.");
+
+        DownloadResult downloadResult = downloadLatestReleaseToS3(progress);
         String esxMmlPrefix = downloadResult.s3Prefix() + "/esx_mml";
-        IndexResult indexResult = indexS3Prefix(esxMmlPrefix);
+        emit(progress, "Starting index phase for prefix: " + esxMmlPrefix);
+        IndexResult indexResult = indexS3Prefix(esxMmlPrefix, progress);
+        emit(progress, "Full ingest completed.");
         
         return new FullIngestResult(downloadResult, indexResult);
     }
@@ -539,6 +595,17 @@ public class IngestService {
         if (seconds < 60) return seconds + "s";
         if (seconds < 3600) return String.format("%dm %ds", seconds / 60, seconds % 60);
         return String.format("%dh %dm %ds", seconds / 3600, (seconds % 3600) / 60, seconds % 60);
+    }
+
+    private static void emit(Consumer<String> progress, String message) {
+        if (progress == null || message == null || message.isBlank()) {
+            return;
+        }
+        try {
+            progress.accept(message);
+        } catch (Exception ignored) {
+            // Ignore listener failures to not break ingest flow.
+        }
     }
 
 }

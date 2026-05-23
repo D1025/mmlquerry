@@ -1,4 +1,5 @@
 import MenuBookRoundedIcon from '@mui/icons-material/MenuBookRounded'
+import ManageAccountsRoundedIcon from '@mui/icons-material/ManageAccountsRounded'
 import TerminalRoundedIcon from '@mui/icons-material/TerminalRounded'
 import { AppBar, Button, Stack, Toolbar, Typography } from '@mui/material'
 import type { AppPage } from '../queryWorkbenchUtils'
@@ -75,6 +76,14 @@ export function WorkbenchHeader({
             onClick={() => onNavigate('examples')}
           >
             Przyklady
+          </Button>
+          <Button
+            size="small"
+            variant={pageRoute === 'admin' ? 'contained' : 'outlined'}
+            startIcon={<ManageAccountsRoundedIcon fontSize="small" />}
+            onClick={() => onNavigate('admin')}
+          >
+            Admin
           </Button>
         </Stack>
       </Toolbar>

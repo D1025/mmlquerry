@@ -1,7 +1,7 @@
 import type { ExecuteQueryRequest, ExecuteQueryResponse, QueryItem } from './queryApi'
 
 export type SortDirection = 'asc' | 'desc'
-export type AppPage = 'editor' | 'examples'
+export type AppPage = 'editor' | 'examples' | 'admin'
 
 export interface ColumnDef {
   key: string
@@ -37,7 +37,14 @@ export const PRELOAD_BEHIND_PAGES = 2
 export const MAX_CACHED_PAGES_PER_KEY = 24
 
 export function resolvePageFromPath(pathname: string): AppPage {
-  return pathname.toLowerCase() === 'examples' ? 'examples' : 'editor'
+  const normalized = pathname.toLowerCase()
+  if (normalized === 'examples') {
+    return 'examples'
+  }
+  if (normalized === 'admin') {
+    return 'admin'
+  }
+  return 'editor'
 }
 
 export function normalizeRequestString(raw: string | undefined): string {

@@ -49,6 +49,7 @@ import type {
 import { EditorWorkspaceView } from './features/query/ui/EditorWorkspaceView'
 import { ExamplesLibraryView } from './features/query/ui/ExamplesLibraryView'
 import { WorkbenchHeader } from './features/query/ui/WorkbenchHeader'
+import { AdminPanelView } from './features/admin/ui/AdminPanelView'
 
 const SUGGESTION_LIST_ID = 'query-suggestion-list'
 const SUGGESTION_OPTION_ID_PREFIX = 'query-suggestion-option'
@@ -199,6 +200,10 @@ function App() {
       document.title = `Przyklady | ${appName}`
       return
     }
+    if (pageRoute === 'admin') {
+      document.title = `Admin | ${appName}`
+      return
+    }
 
     if (executeStatus === 'loading') {
       document.title = `Wyszukiwanie... | ${appName}`
@@ -271,7 +276,11 @@ function App() {
   }
 
   const navigateToPage = useCallback((nextPage: AppPage) => {
-    const hash = nextPage === 'examples' ? '#/examples' : '#/'
+    const hash = nextPage === 'examples'
+      ? '#/examples'
+      : nextPage === 'admin'
+        ? '#/admin'
+        : '#/'
     if (window.location.hash !== hash) {
       window.location.hash = hash
     }
@@ -767,12 +776,14 @@ function App() {
               setIsSyntaxPanelCollapsed((current) => !current)
             }
           />
-        ) : (
+        ) : pageRoute === 'examples' ? (
           <ExamplesLibraryView
             sections={categorizedExamples}
             onUseQuery={handleExampleSelect}
             onBackToEditor={() => navigateToPage('editor')}
           />
+        ) : (
+          <AdminPanelView />
         )}
       </Container>
     </Stack>

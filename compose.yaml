@@ -52,7 +52,7 @@ services:
       context: ./mizar-stack
       dockerfile: Dockerfile
     environment:
-      JAVA_OPTS: "${JAVA_OPTS} -Djdk.xml.maxElementDepth=4096"
+      JAVA_OPTS: "${JAVA_OPTS:-} -Djdk.xml.maxElementDepth=4096"
       # JDBC
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB}
       SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER}
@@ -72,6 +72,7 @@ services:
       ESX_MODE: ${ESX_MODE}
       GITHUB_REPO: ${GITHUB_REPO}
       GITHUB_TOKEN: ${GITHUB_TOKEN}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
     ports:
       - "127.0.0.1:${APP_PORT}:8080"
     depends_on:
@@ -83,6 +84,26 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  frontend:
+    build:
+      context: ./mml-querry-frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: ${FRONTEND_API_BASE_URL:-/api}
+    environment:
+      NGINX_SSL_IP: ${FRONTEND_SSL_IP:-127.0.0.1}
+      NGINX_SSL_DAYS: ${FRONTEND_SSL_DAYS:-825}
+    ports:
+      - "0.0.0.0:${FRONTEND_HTTP_PORT:-8081}:80"
+      - "0.0.0.0:${FRONTEND_HTTPS_PORT:-8443}:443"
+    depends_on:
+      app:
+        condition: service_started
+    volumes:
+      - frontend-certs:/etc/nginx/certs
+    restart: unless-stopped
+
 volumes:
   pgdata:
   minio-data:
+  frontend-certs:
