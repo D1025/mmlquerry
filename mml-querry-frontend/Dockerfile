@@ -15,13 +15,14 @@ RUN npm run build
 
 FROM nginx:1.29-alpine
 
-RUN apk add --no-cache openssl
-
-COPY nginx/nginx.conf /etc/nginx/nginx.conf
-COPY nginx/40-generate-self-signed.sh /docker-entrypoint.d/40-generate-self-signed.sh
+COPY nginx/default.http.conf.template /etc/nginx/custom-templates/default.http.conf.template
+COPY nginx/default.https.conf.template /etc/nginx/custom-templates/default.https.conf.template
+COPY nginx/start-nginx.sh /usr/local/bin/start-nginx.sh
 COPY --from=build /app/dist /usr/share/nginx/html
 
-RUN chmod +x /docker-entrypoint.d/40-generate-self-signed.sh \
-    && mkdir -p /etc/nginx/certs
+RUN chmod +x /usr/local/bin/start-nginx.sh \
+    && mkdir -p /var/www/certbot /etc/nginx/custom-templates
 
 EXPOSE 80 443
+
+CMD ["/usr/local/bin/start-nginx.sh"]

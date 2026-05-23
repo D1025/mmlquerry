@@ -75,6 +75,8 @@ constructor_definition -- Definicje konstruktorów
 
 ## 🚀 Uruchomienie
 
+Szczegolowy runbook pod serwer Linux i HTTPS na IP znajdziesz w `DEPLOY_LINUX.md`.
+
 ### Prerequisites
 
 ```bash
@@ -101,35 +103,42 @@ cd mizar-stack
 java -jar build/libs/mizar-stack-0.1.0.jar
 ```
 
-### Frontend (Docker + HTTPS na IP)
+### Frontend (Nginx + Let's Encrypt na IP)
 
-Frontend jest budowany jako statyczny bundle Vite i serwowany przez `nginx`.
-W `docker compose` skonfigurowane jest:
+Frontend jest serwowany przez `nginx`, ktory stoi pomiedzy uzytkownikiem a backendem:
 
-- HTTP `:8081` z przekierowaniem do HTTPS
-- HTTPS `:8443`
-- reverse proxy `/api/* -> app:8080/*`
-- self-signed cert generowany przy starcie kontenera dla wskazanego adresu IP
+- `nginx` publikuje tylko porty `80` i `443`,
+- backend `app` dziala tylko w sieci dockera (bez publicznego portu hosta),
+- ruch API jest proxyowany przez `nginx`: `/api/* -> app:8080/*`.
+
+TLS na samym adresie IP jest realizowany przez Let's Encrypt (profil `shortlived`, certyfikat ~6 dni).
+Certyfikat i odnowienia obsluguja uslugi `certbot-init` (bootstrap) oraz `certbot-renew` (cykliczne renew).
+Frontend startuje od razu w trybie HTTP (na czas bootstrapu certyfikatu), a po wygenerowaniu certyfikatu automatycznie przeladowuje konfiguracje i przechodzi na HTTPS.
 
 Ustawienia w `.env`:
 
 ```env
-FRONTEND_HTTP_PORT=8081
-FRONTEND_HTTPS_PORT=8443
 FRONTEND_API_BASE_URL=/api
-FRONTEND_SSL_IP=127.0.0.1
-FRONTEND_SSL_DAYS=825
+LETSENCRYPT_IP=159.89.106.226
+LETSENCRYPT_EMAIL=admin@example.com
+CERTBOT_RENEW_INTERVAL_SECONDS=43200
+NGINX_RELOAD_CHECK_SECONDS=30
 ADMIN_PASSWORD=changeme-admin
 ```
 
-Uruchomienie:
+Uruchomienie calosci:
 
 ```bash
-docker compose up -d frontend
+docker compose up -d --build
 ```
 
-Przy pierwszym uruchomieniu certyfikat jest tworzony automatycznie w wolumenie `frontend-certs`.
-W przegladarce self-signed bedzie oznaczony jako niezaufany, dopoki nie dodasz go recznie do zaufanych certyfikatow.
+Po starcie:
+
+- `frontend` wystartuje od razu i wystawi challenge ACME na porcie `80`,
+- `certbot-init` pobierze pierwszy certyfikat dla `LETSENCRYPT_IP`,
+- `frontend` automatycznie przeladuje `nginx` i wlaczy HTTPS na `443`,
+- `certbot-renew` bedzie odnawial certyfikat cyklicznie,
+- `frontend` automatycznie przeladuje `nginx` po odnowieniu certyfikatu.
 
 ### Panel admina
 

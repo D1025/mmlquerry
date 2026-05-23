@@ -73,8 +73,8 @@ services:
       GITHUB_REPO: ${GITHUB_REPO}
       GITHUB_TOKEN: ${GITHUB_TOKEN}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
-    ports:
-      - "127.0.0.1:${APP_PORT}:8080"
+    expose:
+      - "8080"
     depends_on:
       postgres:
         condition: service_healthy
@@ -84,6 +84,60 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  certbot-init:
+    image: certbot/certbot:latest
+    environment:
+      LETSENCRYPT_EMAIL: ${LETSENCRYPT_EMAIL:-admin@example.com}
+      LETSENCRYPT_IP: ${LETSENCRYPT_IP:-159.89.106.226}
+    entrypoint: >
+      /bin/sh -c "
+      set -eu;
+      cert_path=/etc/letsencrypt/live/$${LETSENCRYPT_IP}/fullchain.pem;
+      if [ -f \"$${cert_path}\" ]; then
+        echo \"Let''s Encrypt certificate already exists for $${LETSENCRYPT_IP}.\";
+        touch /var/www/certbot/.reload-nginx;
+        exit 0;
+      fi;
+      certbot certonly --non-interactive --agree-tos \
+        --email \"$${LETSENCRYPT_EMAIL}\" \
+        --preferred-profile shortlived \
+        --webroot \
+        --webroot-path /var/www/certbot \
+        --cert-name \"$${LETSENCRYPT_IP}\" \
+        --ip-address \"$${LETSENCRYPT_IP}\";
+      touch /var/www/certbot/.reload-nginx;
+      "
+    volumes:
+      - letsencrypt:/etc/letsencrypt
+      - certbot-www:/var/www/certbot
+    depends_on:
+      frontend:
+        condition: service_started
+    restart: "no"
+
+  certbot-renew:
+    image: certbot/certbot:latest
+    environment:
+      CERTBOT_RENEW_INTERVAL_SECONDS: ${CERTBOT_RENEW_INTERVAL_SECONDS:-43200}
+    entrypoint: >
+      /bin/sh -c "
+      set -eu;
+      trap exit TERM;
+      while :; do
+        certbot renew --webroot --webroot-path /var/www/certbot \
+          --preferred-profile shortlived \
+          --deploy-hook 'touch /var/www/certbot/.reload-nginx';
+        sleep \"$${CERTBOT_RENEW_INTERVAL_SECONDS}\" & wait $${!};
+      done
+      "
+    volumes:
+      - letsencrypt:/etc/letsencrypt
+      - certbot-www:/var/www/certbot
+    depends_on:
+      frontend:
+        condition: service_started
+    restart: unless-stopped
+
   frontend:
     build:
       context: ./mml-querry-frontend
@@ -91,19 +145,21 @@ services:
       args:
         VITE_API_BASE_URL: ${FRONTEND_API_BASE_URL:-/api}
     environment:
-      NGINX_SSL_IP: ${FRONTEND_SSL_IP:-127.0.0.1}
-      NGINX_SSL_DAYS: ${FRONTEND_SSL_DAYS:-825}
+      LETSENCRYPT_IP: ${LETSENCRYPT_IP:-159.89.106.226}
+      NGINX_RELOAD_CHECK_SECONDS: ${NGINX_RELOAD_CHECK_SECONDS:-30}
     ports:
-      - "0.0.0.0:${FRONTEND_HTTP_PORT:-8081}:80"
-      - "0.0.0.0:${FRONTEND_HTTPS_PORT:-8443}:443"
+      - "0.0.0.0:80:80"
+      - "0.0.0.0:443:443"
     depends_on:
       app:
         condition: service_started
     volumes:
-      - frontend-certs:/etc/nginx/certs
+      - letsencrypt:/etc/letsencrypt:ro
+      - certbot-www:/var/www/certbot
     restart: unless-stopped
 
 volumes:
   pgdata:
   minio-data:
-  frontend-certs:
+  letsencrypt:
+  certbot-www:
