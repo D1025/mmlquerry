@@ -34,11 +34,19 @@ monitor_reload_trigger() {
     current_stamp="$(stat -c %Y "$trigger_file" 2>/dev/null || echo 0)"
     current_cert_stamp="$(stat -c %Y "$cert_file" 2>/dev/null || echo 0)"
     if [ "$current_stamp" != "$last_reload_stamp" ] || [ "$current_cert_stamp" != "$last_cert_stamp" ]; then
-      last_reload_stamp="$current_stamp"
-      last_cert_stamp="$current_cert_stamp"
       render_config
-      nginx -s reload || true
+      if nginx -t; then
+        if nginx -s reload; then
+          last_reload_stamp="$current_stamp"
+          last_cert_stamp="$current_cert_stamp"
+        else
+          echo "Nginx reload failed, will retry on next loop."
+        fi
+      else
+        echo "Nginx config test failed, will retry on next loop."
+      fi
     fi
+
     sleep "$check_interval"
   done
 }
