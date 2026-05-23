@@ -89,24 +89,26 @@ services:
     environment:
       LETSENCRYPT_EMAIL: ${LETSENCRYPT_EMAIL:-admin@example.com}
       LETSENCRYPT_IP: ${LETSENCRYPT_IP:-159.89.106.226}
-    entrypoint: >
-      /bin/sh -c "
-      set -eu;
-      cert_path=/etc/letsencrypt/live/$${LETSENCRYPT_IP}/fullchain.pem;
-      if [ -f \"$${cert_path}\" ]; then
-        echo \"Let''s Encrypt certificate already exists for $${LETSENCRYPT_IP}.\";
-        touch /var/www/certbot/.reload-nginx;
-        exit 0;
-      fi;
-      certbot certonly --non-interactive --agree-tos \
-        --email \"$${LETSENCRYPT_EMAIL}\" \
-        --preferred-profile shortlived \
-        --webroot \
-        --webroot-path /var/www/certbot \
-        --cert-name \"$${LETSENCRYPT_IP}\" \
-        --ip-address \"$${LETSENCRYPT_IP}\";
-      touch /var/www/certbot/.reload-nginx;
-      "
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        cert_path="/etc/letsencrypt/live/$${LETSENCRYPT_IP}/fullchain.pem"
+        if [ -f "$${cert_path}" ]; then
+          echo "Let's Encrypt certificate already exists for $${LETSENCRYPT_IP}."
+          touch /var/www/certbot/.reload-nginx
+          exit 0
+        fi
+        certbot certonly \
+          --non-interactive \
+          --agree-tos \
+          --email "$${LETSENCRYPT_EMAIL}" \
+          --preferred-profile shortlived \
+          --webroot \
+          --webroot-path /var/www/certbot \
+          --cert-name "$${LETSENCRYPT_IP}" \
+          --ip-address "$${LETSENCRYPT_IP}"
+        touch /var/www/certbot/.reload-nginx
     volumes:
       - letsencrypt:/etc/letsencrypt
       - certbot-www:/var/www/certbot
@@ -119,17 +121,19 @@ services:
     image: certbot/certbot:latest
     environment:
       CERTBOT_RENEW_INTERVAL_SECONDS: ${CERTBOT_RENEW_INTERVAL_SECONDS:-43200}
-    entrypoint: >
-      /bin/sh -c "
-      set -eu;
-      trap exit TERM;
-      while :; do
-        certbot renew --webroot --webroot-path /var/www/certbot \
-          --preferred-profile shortlived \
-          --deploy-hook 'touch /var/www/certbot/.reload-nginx';
-        sleep \"$${CERTBOT_RENEW_INTERVAL_SECONDS}\" & wait $${!};
-      done
-      "
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        trap exit TERM
+        while :; do
+          certbot renew \
+            --webroot \
+            --webroot-path /var/www/certbot \
+            --preferred-profile shortlived \
+            --deploy-hook "touch /var/www/certbot/.reload-nginx"
+          sleep "$${CERTBOT_RENEW_INTERVAL_SECONDS}" & wait $!
+        done
     volumes:
       - letsencrypt:/etc/letsencrypt
       - certbot-www:/var/www/certbot

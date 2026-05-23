@@ -140,6 +140,8 @@ Po starcie:
 - `certbot-renew` bedzie odnawial certyfikat cyklicznie,
 - `frontend` automatycznie przeladuje `nginx` po odnowieniu certyfikatu.
 
+Uwaga: dopoki certyfikat nie zostanie wydany, frontend dziala w trybie HTTP (port `80`), a HTTPS (`443`) moze zwracac `connection refused`.
+
 ### Panel admina
 
 - W naglowku frontendu dostepna jest zakladka `Admin`.
