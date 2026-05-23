@@ -38,6 +38,9 @@ public class AdminAuthInterceptor implements HandlerInterceptor {
         }
 
         String authorizationHeader = request.getHeader("Authorization");
+        if (authorizationHeader == null || authorizationHeader.isBlank()) {
+            authorizationHeader = request.getHeader("X-Admin-Authorization");
+        }
         if (!adminAuthService.authorize(authorizationHeader)) {
             log.warn("Unauthorized admin request: method={} uri={} remote={}",
                     request.getMethod(), request.getRequestURI(), request.getRemoteAddr());

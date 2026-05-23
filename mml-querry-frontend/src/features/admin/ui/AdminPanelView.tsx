@@ -52,6 +52,18 @@ function statusColor(
   return 'default'
 }
 
+function isAuthFailureMessage(message: string): boolean {
+  const normalized = message.toLowerCase()
+  return (
+    normalized.includes('invalid admin authorization') ||
+    normalized.includes('admin password is not configured') ||
+    normalized.includes('unauthorized') ||
+    normalized.includes('forbidden') ||
+    normalized.includes('http 401') ||
+    normalized.includes('http 403')
+  )
+}
+
 export function AdminPanelView() {
   const [password, setPassword] = useState('')
   const [tokenHash, setTokenHash] = useState<string>(() => {
@@ -106,7 +118,7 @@ export function AdminPanelView() {
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Nie udalo sie pobrac szczegolow operacji.'
         setOperationsError(message)
-        if (message.toLowerCase().includes('invalid admin authorization')) {
+        if (isAuthFailureMessage(message)) {
           setTokenHash('')
           persistToken('')
           setSelectedOperation(null)
@@ -146,7 +158,7 @@ export function AdminPanelView() {
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Nie udalo sie pobrac listy operacji.'
         setOperationsError(message)
-        if (message.toLowerCase().includes('invalid admin authorization')) {
+        if (isAuthFailureMessage(message)) {
           setTokenHash('')
           persistToken('')
           setSelectedOperation(null)
@@ -237,7 +249,7 @@ export function AdminPanelView() {
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Operacja zakonczona bledem.'
       setOperationsError(message)
-      if (message.toLowerCase().includes('invalid admin authorization')) {
+      if (isAuthFailureMessage(message)) {
         handleLogout()
       }
     } finally {
@@ -267,7 +279,13 @@ export function AdminPanelView() {
             >
               <Typography variant="h6">Panel administratora</Typography>
               {isAuthenticated && (
-                <Button size="small" variant="outlined" color="inherit" onClick={handleLogout}>
+                <Button
+                  size="small"
+                  variant="outlined"
+                  color="inherit"
+                  onClick={handleLogout}
+                  sx={{ minHeight: 40, px: 2, whiteSpace: 'nowrap' }}
+                >
                   Wyloguj
                 </Button>
               )}
@@ -294,10 +312,11 @@ export function AdminPanelView() {
                     }}
                   />
                   <Button
+                    size="small"
                     variant="contained"
                     onClick={() => void handleLogin()}
                     disabled={authLoading}
-                    sx={{ minWidth: 140 }}
+                    sx={{ minWidth: 140, minHeight: 40, px: 2, whiteSpace: 'nowrap' }}
                   >
                     {authLoading ? <CircularProgress size={18} color="inherit" /> : 'Zaloguj'}
                   </Button>
@@ -308,17 +327,27 @@ export function AdminPanelView() {
 
             {isAuthenticated && (
               <Stack spacing={2}>
-                <Stack direction={{ xs: 'column', lg: 'row' }} spacing={1.25}>
+                <Stack
+                  direction={{ xs: 'column', lg: 'row' }}
+                  spacing={1.25}
+                  sx={{ alignItems: { xs: 'stretch', lg: 'flex-start' } }}
+                >
                   <Button
+                    size="small"
                     variant="contained"
                     disabled={Boolean(actionLoading) || hasRunningOperation}
                     onClick={() =>
                       void runAction('download', () => startAdminDownload(tokenHash))
                     }
+                    sx={{ minHeight: 40, px: 2, whiteSpace: 'nowrap' }}
                   >
                     {actionLoading === 'download' ? 'Uruchamianie...' : 'Pobierz zasoby do S3'}
                   </Button>
-                  <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.25} sx={{ flexGrow: 1 }}>
+                  <Stack
+                    direction={{ xs: 'column', sm: 'row' }}
+                    spacing={1.25}
+                    sx={{ flexGrow: 1, alignItems: { xs: 'stretch', sm: 'flex-start' } }}
+                  >
                     <TextField
                       label="Prefix S3 do indeksowania"
                       size="small"
@@ -329,19 +358,22 @@ export function AdminPanelView() {
                       helperText={indexPrefixError ?? "Np. mizar-esx/releases/<tag>/esx_mml"}
                     />
                     <Button
+                      size="small"
                       variant="contained"
                       disabled={Boolean(actionLoading) || hasRunningOperation}
                       onClick={() => void handleStartIndex()}
-                      sx={{ minWidth: 170 }}
+                      sx={{ minWidth: 170, minHeight: 40, px: 2, whiteSpace: 'nowrap' }}
                     >
                       {actionLoading === 'index' ? 'Uruchamianie...' : 'Uruchom indeksowanie'}
                     </Button>
                   </Stack>
                   <Button
+                    size="small"
                     variant="contained"
                     color="secondary"
                     disabled={Boolean(actionLoading) || hasRunningOperation}
                     onClick={() => void runAction('full', () => startAdminFull(tokenHash))}
+                    sx={{ minHeight: 40, px: 2, whiteSpace: 'nowrap' }}
                   >
                     {actionLoading === 'full' ? 'Uruchamianie...' : 'Pelny ingest'}
                   </Button>
@@ -365,6 +397,7 @@ export function AdminPanelView() {
                     variant="outlined"
                     onClick={() => void loadOperations(tokenHash)}
                     disabled={operationsLoading}
+                    sx={{ minHeight: 32, whiteSpace: 'nowrap' }}
                   >
                     Odswiez
                   </Button>

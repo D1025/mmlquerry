@@ -27,27 +27,35 @@ interface AdminStatusResponse {
 function buildAuthHeaders(tokenHash: string): HeadersInit {
   return {
     Authorization: `Bearer ${tokenHash}`,
+    'X-Admin-Authorization': `Bearer ${tokenHash}`,
   }
 }
 
 async function parseResponse<T>(response: Response): Promise<T> {
+  const responseText = await response.text()
   if (response.ok) {
-    return (await response.json()) as T
+    if (!responseText) {
+      return {} as T
+    }
+    try {
+      return JSON.parse(responseText) as T
+    } catch {
+      throw new Error(`Expected JSON response, received non-JSON body (status ${response.status}).`)
+    }
   }
 
   let message = `Request failed with status ${response.status}`
   try {
-    const errorBody = await response.json()
+    const errorBody = responseText ? (JSON.parse(responseText) as { message?: unknown }) : null
     if (typeof errorBody?.message === 'string' && errorBody.message.trim()) {
       message = errorBody.message
     }
   } catch {
-    const errorText = await response.text()
-    if (errorText) {
-      message = errorText
+    if (responseText.trim()) {
+      message = responseText
     }
   }
-  throw new Error(message)
+  throw new Error(`${message} (HTTP ${response.status})`)
 }
 
 export async function getAdminStatus(tokenHash: string): Promise<AdminStatusResponse> {
