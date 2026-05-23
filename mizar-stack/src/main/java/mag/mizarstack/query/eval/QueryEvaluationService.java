@@ -676,12 +676,31 @@ public class QueryEvaluationService {
             return List.of();
         }
 
+        Map<String, Object> params = new LinkedHashMap<>();
+        params.put("itemIdsCsv", toUuidCsv(itemIds));
+
+        if (comparator == CardinalityComparator.EQ) {
+            String sql = """
+                    with base_items as (
+                        select cast(unnest(string_to_array(:itemIdsCsv, ',')) as uuid) as item_id
+                    )
+                    select distinct n.item_id
+                    from base_items bi
+                    join item_node n on n.item_id = bi.item_id
+                    where lower(coalesce(n.details ->> 'tag', '')) in ('numeral-term', 'natural-term', 'numeralterm', 'naturalterm')
+                      and jsonb_exists(coalesce(n.details -> 'attrs', '{}'::jsonb), 'number')
+                      and coalesce(n.details -> 'attrs' ->> 'number', '') = :numericThresholdText
+                    """;
+            params.put("numericThresholdText", Long.toString(threshold));
+            return queryItemIds(sql, params);
+        }
+
         String sqlComparator = switch (comparator) {
-            case EQ -> "=";
             case GE -> ">=";
             case LE -> "<=";
             case GT -> ">";
             case LT -> "<";
+            case EQ -> "=";
         };
 
         String sql = """
@@ -695,11 +714,9 @@ public class QueryEvaluationService {
                   and jsonb_exists(coalesce(n.details -> 'attrs', '{}'::jsonb), 'number')
                   and coalesce(n.details -> 'attrs' ->> 'number', '') ~ '^[0-9]+$'
                   and (coalesce(n.details -> 'attrs' ->> 'number', '0'))::numeric
-                """ + " " + sqlComparator + " cast(:numericThreshold as numeric)";
+                """ + " " + sqlComparator + " :numericThreshold";
 
-        Map<String, Object> params = new LinkedHashMap<>();
-        params.put("itemIdsCsv", toUuidCsv(itemIds));
-        params.put("numericThreshold", Long.toString(threshold));
+        params.put("numericThreshold", java.math.BigDecimal.valueOf(threshold));
         return queryItemIds(sql, params);
     }
 
@@ -809,6 +826,11 @@ public class QueryEvaluationService {
                 ? List.of()
                 : operation.getDescendantPredicates();
 
+        QueryResult optimized = tryApplyOptimizedNodeSelection(base, target, descendantPredicates, itemIds);
+        if (optimized != null) {
+            return optimized;
+        }
+
         StringBuilder sql = new StringBuilder("""
                 with base_items as (
                     select cast(unnest(string_to_array(:itemIdsCsv, ',')) as uuid) as item_id
@@ -860,6 +882,136 @@ public class QueryEvaluationService {
         for (int i = 0; i < descendantPredicates.size(); i++) {
             putNodePredicateParams(params, descendantPredicates.get(i), i + 1);
         }
+
+        List<Map<String, Object>> rows = queryRows(sql.toString(), params);
+        return new QueryResult(
+                deduplicate(removeAncestorNodeRows(rows)),
+                "Selected nodes: " + target.getNodeName()
+        );
+    }
+
+    private QueryResult tryApplyOptimizedNodeSelection(
+            QueryResult base,
+            NodePredicate target,
+            List<NodePredicate> descendantPredicates,
+            List<UUID> itemIds
+    ) {
+        if (target == null || target.isNegated()) {
+            return null;
+        }
+        if (!"item".equals(normalizeLookupValue(target.getNodeName()))) {
+            return null;
+        }
+        if (target.getAttributeName() != null && !target.getAttributeName().isBlank()) {
+            return null;
+        }
+        if (descendantPredicates == null || descendantPredicates.size() != 2) {
+            return null;
+        }
+
+        NodePredicate redefineTruePredicate = null;
+        NodePredicate spellingPredicate = null;
+        for (NodePredicate predicate : descendantPredicates) {
+            if (predicate == null || predicate.isNegated()) {
+                return null;
+            }
+
+            String nodeName = normalizeLookupValue(predicate.getNodeName());
+            String attributeName = normalizeLookupValue(predicate.getAttributeName());
+            String attributeValue = normalizeLookupValue(predicate.getAttributeValue());
+
+            boolean redefineTrue = "redefine".equals(nodeName)
+                    && "occurs".equals(attributeName)
+                    && "true".equals(attributeValue);
+            if (redefineTrue) {
+                if (redefineTruePredicate != null) {
+                    return null;
+                }
+                redefineTruePredicate = predicate;
+                continue;
+            }
+
+            boolean spellingWildcard = isWildcardNode(nodeName)
+                    && "spelling".equals(attributeName)
+                    && !attributeValue.isBlank();
+            if (spellingWildcard) {
+                if (spellingPredicate != null) {
+                    return null;
+                }
+                spellingPredicate = predicate;
+                continue;
+            }
+
+            return null;
+        }
+
+        if (redefineTruePredicate == null || spellingPredicate == null) {
+            return null;
+        }
+
+        String normalizedSpelling = normalizeLookupValue(spellingPredicate.getAttributeValue());
+        Map<String, Object> params = new LinkedHashMap<>();
+        params.put("itemIdsCsv", toUuidCsv(itemIds));
+
+        StringBuilder sql = new StringBuilder("""
+                with base_items as (
+                    select cast(unnest(string_to_array(:itemIdsCsv, ',')) as uuid) as item_id
+                )
+                select distinct
+                       n0.id as node_id,
+                       n0.item_id,
+                       mi.lib_id,
+                       a.name as article_name,
+                       mi.kind,
+                       coalesce(n0.details -> 'attrs' ->> 'kind', mi.subkind) as subkind,
+                       n0.raw as raw_text,
+                       coalesce(n0.details -> 'attrs' ->> 'kind', lower(coalesce(n0.details ->> 'tag', ''))) as node_type,
+                       coalesce(n0.details -> 'attrs' ->> 'position', cast(n0.pos as text)) as text_position,
+                       trim(coalesce(n0.details -> 'attrs' ->> 'spelling', '')) as spelling,
+                       n0.node_path,
+                       lower(coalesce(n0.details ->> 'tag', '')) as node_tag,
+                       n0.details -> 'attrs' ->> 'xmlid' as node_xmlid
+                from base_items bi
+                join item_node n0 on n0.item_id = bi.item_id
+                join mml_item mi on mi.id = n0.item_id
+                join article a on a.id = mi.article_id
+                where 1=1
+                """);
+
+        appendNodePredicateCondition(sql, target, "n0", 0);
+        putNodePredicateParams(params, target, 0);
+
+        sql.append("""
+                  and exists (
+                      select 1
+                      from item_node nr
+                      where nr.item_id = n0.item_id
+                        and nr.depth > n0.depth
+                        and nr.node_path like n0.node_path || '/%'
+                        and lower(coalesce(nr.details ->> 'tag', '')) = 'redefine'
+                        and lower(coalesce(nr.details -> 'attrs' ->> 'occurs', '')) = 'true'
+                  )
+                  and exists (
+                      select 1
+                      from item_node ns
+                      where ns.item_id = n0.item_id
+                        and ns.depth > n0.depth
+                        and ns.node_path like n0.node_path || '/%'
+                        and jsonb_exists(coalesce(ns.details -> 'attrs', '{}'::jsonb), 'spelling')
+                """);
+
+        if (isPatternLikeValue(normalizedSpelling)) {
+            sql.append("\n                    and lower(coalesce(ns.details -> 'attrs' ->> 'spelling', ''))")
+                    .append(" like :fastNodeSpellingPattern")
+                    .append(SQL_LIKE_ESCAPE_CLAUSE);
+            params.put("fastNodeSpellingPattern", toSqlLikePattern(normalizedSpelling));
+        } else {
+            sql.append("\n                    and lower(coalesce(ns.details -> 'attrs' ->> 'spelling', '')) = :fastNodeSpelling");
+            params.put("fastNodeSpelling", unescapePatternLiterals(normalizedSpelling));
+        }
+
+        sql.append("\n              )")
+                .append("\norder by article_name, text_position, n0.node_path");
 
         List<Map<String, Object>> rows = queryRows(sql.toString(), params);
         return new QueryResult(
