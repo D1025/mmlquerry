@@ -35,6 +35,7 @@ const PIPELINE_KEYWORDS = [
   'numle',
   'numgt',
   'numlt',
+  'number',
 ]
 const NODE_HINTS = [
   'InfixTerm',

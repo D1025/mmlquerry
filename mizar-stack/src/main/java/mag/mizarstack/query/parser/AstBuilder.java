@@ -251,6 +251,12 @@ public class AstBuilder extends MmlQueryBaseVisitor<Object> {
     }
 
     @Override
+    public Object visitOpNumberComparator(MmlQueryParser.OpNumberComparatorContext ctx) {
+        CardinalityComparator comparator = parseNumericComparator(ctx.numericComparator().getText());
+        return buildNumericValueOperation(ctx.NUMBER().getText(), comparator);
+    }
+
+    @Override
     public Object visitOpCardinality(MmlQueryParser.OpCardinalityContext ctx) {
         return visit(ctx.cardinalityOperation());
     }
@@ -340,6 +346,18 @@ public class AstBuilder extends MmlQueryBaseVisitor<Object> {
     ) {
         long threshold = Long.parseLong(thresholdRaw);
         return new NumericValueFilterOperationNode(comparator, threshold);
+    }
+
+    private CardinalityComparator parseNumericComparator(String token) {
+        String normalized = token == null ? "" : token.trim();
+        return switch (normalized) {
+            case "=" -> CardinalityComparator.EQ;
+            case ">=" -> CardinalityComparator.GE;
+            case "<=" -> CardinalityComparator.LE;
+            case ">" -> CardinalityComparator.GT;
+            case "<" -> CardinalityComparator.LT;
+            default -> throw new IllegalArgumentException("Unsupported numeric comparator: " + token);
+        };
     }
 
     private ListType parseListType(String text) {

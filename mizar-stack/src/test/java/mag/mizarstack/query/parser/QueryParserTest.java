@@ -391,6 +391,30 @@ class QueryParserTest {
     }
 
     @Test
+    void parsesPipelineWithNumericValueFilterInfixEq() {
+        QueryNode node = parser.parseQuery("list of statement | number = 200");
+        assertInstanceOf(OperationQueryNode.class, node);
+
+        OperationQueryNode outer = (OperationQueryNode) node;
+        assertInstanceOf(NumericValueFilterOperationNode.class, outer.getOperation());
+        NumericValueFilterOperationNode numeric = (NumericValueFilterOperationNode) outer.getOperation();
+        assertEquals(CardinalityComparator.EQ, numeric.getComparator());
+        assertEquals(200L, numeric.getThreshold());
+    }
+
+    @Test
+    void parsesPipelineWithNumericValueFilterInfixGe() {
+        QueryNode node = parser.parseQuery("list of statement | number >= 200");
+        assertInstanceOf(OperationQueryNode.class, node);
+
+        OperationQueryNode outer = (OperationQueryNode) node;
+        assertInstanceOf(NumericValueFilterOperationNode.class, outer.getOperation());
+        NumericValueFilterOperationNode numeric = (NumericValueFilterOperationNode) outer.getOperation();
+        assertEquals(CardinalityComparator.GE, numeric.getComparator());
+        assertEquals(200L, numeric.getThreshold());
+    }
+
+    @Test
     void parsesCompoundBooleanOperators() {
         QueryNode node = parser.parseQuery("list of theorem and not list of definition");
         assertInstanceOf(CompoundQueryNode.class, node);

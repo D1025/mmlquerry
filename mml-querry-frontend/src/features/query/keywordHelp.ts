@@ -28,6 +28,7 @@ const KEYWORD_HELP: Record<string, string> = {
   numle: 'Pipeline: filtruje po wartości liczbowej <= N.',
   numgt: 'Pipeline: filtruje po wartości liczbowej > N.',
   numlt: 'Pipeline: filtruje po wartości liczbowej < N.',
+  number: 'Pipeline: skrót porównania liczbowego, np. "number = 200", "number >= 1000".',
   spelling: 'Atrybut XML: tekstowy zapis symbolu/patternu.',
   negated:
     "Słowo kluczowe skrótu 'negated adjective': oznacza zaprzeczony przymiotnik (nonocc='true').",

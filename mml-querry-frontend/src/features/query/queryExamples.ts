@@ -301,9 +301,9 @@ export const EXAMPLE_QUERY_LIBRARY: ExampleQueryDefinition[] = [
   },
   {
     id: 'numeric-gt-threshold',
-    title: 'Liczby rowne 1 (numeq)',
-    description: 'Przyklad dzialajacy dla ABCMIZ_0: wyrazenia liczbowe rowne 1.',
-    query: 'list of statement | numeq(1)',
+    title: 'Liczby rowne 1 (number =)',
+    description: 'Skrocony zapis porownania liczbowego: number = N (rownowazne numeq(N)).',
+    query: 'list of statement | number = 1',
   },
   {
     id: 'node-cardinality-3-numerals',

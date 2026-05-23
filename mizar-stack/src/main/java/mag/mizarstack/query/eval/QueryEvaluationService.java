@@ -608,6 +608,34 @@ public class QueryEvaluationService {
         if (operation == null) {
             return base;
         }
+
+        List<UUID> itemIds = extractItemIds(base.getData());
+        if (!itemIds.isEmpty()) {
+            BigInteger threshold = BigInteger.valueOf(operation.getThreshold());
+            BigInteger cap = threshold.add(BigInteger.ONE);
+            Set<UUID> matched = new HashSet<>(
+                    queryNumericLiteralItemIds(itemIds, operation.getComparator(), operation.getThreshold())
+            );
+            List<Map<String, Object>> filtered = base.getData().stream()
+                    .filter(row -> {
+                        UUID itemId = asUuid(row.get("item_id"));
+                        if (itemId != null) {
+                            return matched.contains(itemId);
+                        }
+                        return matchesNumericThreshold(
+                                extractRawText(row),
+                                operation.getComparator(),
+                                threshold,
+                                cap
+                        );
+                    })
+                    .toList();
+            return new QueryResult(
+                    filtered,
+                    "Numeric value filter " + operation.getComparator() + "(" + operation.getThreshold() + ")"
+            );
+        }
+
         BigInteger threshold = BigInteger.valueOf(operation.getThreshold());
         BigInteger cap = threshold.add(BigInteger.ONE);
 
@@ -637,6 +665,42 @@ public class QueryEvaluationService {
                 filtered,
                 "Numeric value filter " + operation.getComparator() + "(" + operation.getThreshold() + ")"
         );
+    }
+
+    private List<UUID> queryNumericLiteralItemIds(
+            List<UUID> itemIds,
+            CardinalityComparator comparator,
+            long threshold
+    ) {
+        if (itemIds == null || itemIds.isEmpty() || comparator == null) {
+            return List.of();
+        }
+
+        String sqlComparator = switch (comparator) {
+            case EQ -> "=";
+            case GE -> ">=";
+            case LE -> "<=";
+            case GT -> ">";
+            case LT -> "<";
+        };
+
+        String sql = """
+                with base_items as (
+                    select cast(unnest(string_to_array(:itemIdsCsv, ',')) as uuid) as item_id
+                )
+                select distinct n.item_id
+                from base_items bi
+                join item_node n on n.item_id = bi.item_id
+                where lower(coalesce(n.details ->> 'tag', '')) in ('numeral-term', 'natural-term', 'numeralterm', 'naturalterm')
+                  and jsonb_exists(coalesce(n.details -> 'attrs', '{}'::jsonb), 'number')
+                  and coalesce(n.details -> 'attrs' ->> 'number', '') ~ '^[0-9]+$'
+                  and (coalesce(n.details -> 'attrs' ->> 'number', '0'))::numeric
+                """ + " " + sqlComparator + " cast(:numericThreshold as numeric)";
+
+        Map<String, Object> params = new LinkedHashMap<>();
+        params.put("itemIdsCsv", toUuidCsv(itemIds));
+        params.put("numericThreshold", Long.toString(threshold));
+        return queryItemIds(sql, params);
     }
 
     private QueryResult applyNodeCardinalityFilter(QueryResult base, NodeCardinalityFilterOperationNode operation) {

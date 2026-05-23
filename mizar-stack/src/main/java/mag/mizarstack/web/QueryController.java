@@ -93,6 +93,7 @@ public class QueryController {
                         "list of statement | wherege(proposition:numeralterm,3) and list of statement where item has InfixTerm[absolutepatternmmlid='NAT_1:1'] and item has InfixTerm",
                         "list of statement where proposition has negated adjective spelling 'empty'",
                         "list of statement | numgt(1000000)",
+                        "list of statement | number = 200",
                         "list of statement | grep('\\\\d+\\\\s*\\\\*\\\\s*\\\\d+|\\\\d+\\\\s*\\\\+\\\\s*\\\\d+|=|<|>') | numgt(1000000)",
                         "list of symbols",
                         "list of symbols where spelling '+'",
@@ -134,7 +135,7 @@ public class QueryController {
                         "sciezki nodow: A/B (dziecko), A//B (dowolna glebokosc), A/3/B (dokladnie 3 poziomy)",
                         "filter('key=value' or 'text') - wildcard: * oraz _, literal: \\* oraz \\_ (escape: \\)",
                         "grep('regex')", "reverse", "invert",
-                        "numeq(n), numge(n), numle(n), numgt(n), numlt(n) - porownanie liczbowe (analiza wyrazen +, *, |^, nawiasy; do kontekstu porownan uzyj grep z =,<,>)",
+                        "numeq(n), numge(n), numle(n), numgt(n), numlt(n) lub number <op> n (np. number = 200) - porownanie liczbowe (analiza wyrazen +, *, |^, nawiasy; do kontekstu porownan uzyj grep z =,<,>)",
                         "whereeq(op,n), wherege(op,n), wherele(op,n), wheregt(op,n), wherelt(op,n)",
                         "whereeq(nodename,n), wherege(nodename,n), ... (domyslny scope item)",
                         "whereeq(proposition:nodename,n), wherege(item:nodename,n), ..."

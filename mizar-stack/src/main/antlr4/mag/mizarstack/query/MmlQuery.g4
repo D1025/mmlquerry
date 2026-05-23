@@ -178,6 +178,15 @@ numericValueOperation
     | NUMLE LPAREN NUMBER RPAREN   # opNumLe
     | NUMGT LPAREN NUMBER RPAREN   # opNumGt
     | NUMLT LPAREN NUMBER RPAREN   # opNumLt
+    | NUMBER_KW numericComparator NUMBER #opNumberComparator
+    ;
+
+numericComparator
+    : EQ
+    | GTE
+    | LTE
+    | GT
+    | LT
     ;
 
 cardinalityOperation
@@ -233,6 +242,10 @@ RPAREN: ')';
 LBRACK: '[';
 RBRACK: ']';
 EQ: '=';
+GTE: '>=';
+LTE: '<=';
+GT: '>';
+LT: '<';
 
 THEOREM: T H E O R E M S?;
 DEFINITION: D E F I N I T I O N S?;
@@ -271,6 +284,7 @@ WHEREGE: W H E R E G E;
 WHERELE: W H E R E L E;
 WHEREGT: W H E R E G T;
 WHERELT: W H E R E L T;
+NUMBER_KW: N U M B E R;
 
 ARTICLE_NAME: [A-Z] [A-Z0-9_]*;
 NODE_NAME: [a-zA-Z] [a-zA-Z0-9_]* ('-' [a-zA-Z0-9_]+)*;
