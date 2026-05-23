@@ -1,12 +1,13 @@
 #!/bin/sh
 set -eu
 
-if [ -z "${LETSENCRYPT_IP:-}" ]; then
-  echo "LETSENCRYPT_IP is required (for certificate path and nginx TLS config)." >&2
+letsencrypt_target="${LETSENCRYPT_TARGET:-${LETSENCRYPT_IP:-}}"
+if [ -z "$letsencrypt_target" ]; then
+  echo "LETSENCRYPT_TARGET (or legacy LETSENCRYPT_IP) is required." >&2
   exit 1
 fi
 
-cert_dir="/etc/letsencrypt/live/${LETSENCRYPT_IP}"
+cert_dir="/etc/letsencrypt/live/${letsencrypt_target}"
 cert_file="${cert_dir}/fullchain.pem"
 key_file="${cert_dir}/privkey.pem"
 trigger_file="/var/www/certbot/.reload-nginx"
@@ -16,7 +17,7 @@ target_conf="/etc/nginx/conf.d/default.conf"
 
 render_config() {
   if [ -f "$cert_file" ] && [ -f "$key_file" ]; then
-    sed "s|\${LETSENCRYPT_IP}|${LETSENCRYPT_IP}|g" "$https_template" > "$target_conf"
+    sed "s|\${LETSENCRYPT_TARGET}|${letsencrypt_target}|g" "$https_template" > "$target_conf"
   else
     cp "$http_template" "$target_conf"
   fi

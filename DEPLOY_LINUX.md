@@ -1,10 +1,10 @@
-# Deploy na Linuxie (Nginx + Let's Encrypt dla IP)
+# Deploy na Linuxie (Nginx + Let's Encrypt dla IP lub domeny)
 
-Poniżej masz gotowy, praktyczny runbook dla serwera Linux i publicznego IP `159.89.106.226`.
+Ponizej masz gotowy, praktyczny runbook dla serwera Linux.
 
 ## 1) Wymagania
 
-- Publiczny serwer Linux z adresem IP `159.89.106.226`.
+- Publiczny serwer Linux.
 - Otwarty ruch przychodzacy TCP `80` i `443` (firewall systemowy + firewall dostawcy chmury).
 - Docker + Docker Compose plugin.
 
@@ -38,11 +38,18 @@ cp .env.template .env
 Edytuj `.env`:
 
 ```env
-LETSENCRYPT_IP=159.89.106.226
+LETSENCRYPT_TARGET=159.89.106.226
 LETSENCRYPT_EMAIL=twoj-email@example.com
 ADMIN_PASSWORD=ustaw-silne-haslo-admina
 POSTGRES_PASSWORD=ustaw-silne-haslo-db
 MINIO_ROOT_PASSWORD=ustaw-silne-haslo-minio
+```
+
+Przyklad dla domeny:
+
+```env
+LETSENCRYPT_TARGET=mizar.twojadomena.pl
+LETSENCRYPT_EMAIL=twoj-email@example.com
 ```
 
 ## 4) Otworzenie portow
@@ -64,7 +71,7 @@ docker compose up -d --build
 Co sie stanie:
 
 - `frontend` (nginx) startuje na `80/443`,
-- `certbot-init` pobiera certyfikat Let's Encrypt dla IP,
+- `certbot-init` pobiera certyfikat Let's Encrypt dla `LETSENCRYPT_TARGET`,
 - po wydaniu certyfikatu frontend przeladowuje konfiguracje i obsluguje HTTPS,
 - `certbot-renew` odnawia certyfikat cyklicznie.
 
@@ -79,8 +86,8 @@ docker compose logs --no-log-prefix frontend
 Test endpointow:
 
 ```bash
-curl -I http://159.89.106.226
-curl -I https://159.89.106.226
+curl -I http://twoj-target
+curl -I https://twoj-target
 ```
 
 ## 7) Gdy certyfikat nie zostal wydany za pierwszym razem

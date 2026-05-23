@@ -75,72 +75,90 @@ constructor_definition -- Definicje konstruktorów
 
 ## 🚀 Uruchomienie
 
-Szczegolowy runbook pod serwer Linux i HTTPS na IP znajdziesz w `DEPLOY_LINUX.md`.
+Szczegolowy runbook pod Linux jest w `DEPLOY_LINUX.md`. Ponizej masz skrocona wersje dla 3 scenariuszy.
 
-### Prerequisites
+### Wymagania
 
-```bash
-# Docker Compose (PostgreSQL + MinIO)
-docker-compose up -d
+- Docker + Docker Compose plugin
+- Java 17+ (backend)
+- Node.js 22+ (frontend dev mode)
 
-# Gradle 8.x+
-java -version  # Java 25+
-```
+### 1) Lokalnie (dev, bez publicznego HTTPS)
 
-### Build
+Ten wariant jest najlepszy do codziennej pracy: baza i storage w Dockerze, backend i frontend odpalane lokalnie.
 
 ```bash
+# 1. Konfiguracja
+cp .env.template .env
+
+# 2. Infrastruktura (DB + MinIO)
+docker compose up -d postgres minio minio-init
+
+# 3. Backend
 cd mizar-stack
-./gradlew build
-```
-
-### Run
-
-```bash
 ./gradlew bootRun
 
-# lub
-java -jar build/libs/mizar-stack-0.1.0.jar
+# 4. Frontend (drugi terminal)
+cd ../mml-querry-frontend
+npm ci
+npm run dev -- --host 0.0.0.0 --port 5173
 ```
 
-### Frontend (Nginx + Let's Encrypt na IP)
+Adresy:
+- Frontend: `http://localhost:5173`
+- Backend API: `http://localhost:8080`
 
-Frontend jest serwowany przez `nginx`, ktory stoi pomiedzy uzytkownikiem a backendem:
+### 2) Serwer bez domeny (HTTPS na publicznym IP)
 
-- `nginx` publikuje tylko porty `80` i `443`,
-- backend `app` dziala tylko w sieci dockera (bez publicznego portu hosta),
-- ruch API jest proxyowany przez `nginx`: `/api/* -> app:8080/*`.
-
-TLS na samym adresie IP jest realizowany przez Let's Encrypt (profil `shortlived`, certyfikat ~6 dni).
-Certyfikat i odnowienia obsluguja uslugi `certbot-init` (bootstrap) oraz `certbot-renew` (cykliczne renew).
-Frontend startuje od razu w trybie HTTP (na czas bootstrapu certyfikatu), a po wygenerowaniu certyfikatu automatycznie przeladowuje konfiguracje i przechodzi na HTTPS.
-
-Ustawienia w `.env`:
+Uzywa certyfikatu Let's Encrypt dla IP (shortlived). Ustaw w `.env`:
 
 ```env
-FRONTEND_API_BASE_URL=/api
-LETSENCRYPT_IP=159.89.106.226
+LETSENCRYPT_TARGET=159.89.106.226
 LETSENCRYPT_EMAIL=admin@example.com
-CERTBOT_RENEW_INTERVAL_SECONDS=43200
-NGINX_RELOAD_CHECK_SECONDS=30
+FRONTEND_API_BASE_URL=/api
 ADMIN_PASSWORD=changeme-admin
 ```
 
-Uruchomienie calosci:
+Uruchom:
 
 ```bash
 docker compose up -d --build
 ```
 
-Po starcie:
+Wymagane:
+- publiczny routing na ten IP,
+- otwarte porty `80/tcp` i `443/tcp`.
 
-- `frontend` wystartuje od razu i wystawi challenge ACME na porcie `80`,
-- `certbot-init` pobierze pierwszy certyfikat dla `LETSENCRYPT_IP`,
-- `frontend` automatycznie przeladuje `nginx` i wlaczy HTTPS na `443`,
-- `certbot-renew` bedzie odnawial certyfikat cyklicznie,
-- `frontend` automatycznie przeladuje `nginx` po odnowieniu certyfikatu.
+### 3) Serwer z domena (HTTPS na domenie)
 
-Uwaga: dopoki certyfikat nie zostanie wydany, frontend dziala w trybie HTTP (port `80`), a HTTPS (`443`) moze zwracac `connection refused`.
+1. Ustaw DNS:
+- rekord `A` (i opcjonalnie `AAAA`) domeny musi wskazywac na serwer.
+
+2. Ustaw `.env`:
+
+```env
+LETSENCRYPT_TARGET=mizar.twojadomena.pl
+LETSENCRYPT_EMAIL=admin@example.com
+FRONTEND_API_BASE_URL=/api
+ADMIN_PASSWORD=changeme-admin
+```
+
+3. Uruchom:
+
+```bash
+docker compose up -d --build
+```
+
+### Jak dziala HTTPS w compose
+
+- `frontend` (nginx) publikuje `80` i `443`,
+- backend `app` dziala tylko wewnetrz sieci dockera (`app:8080`),
+- `/api/*` jest proxy do backendu,
+- `certbot-init` wydaje pierwszy certyfikat,
+- `certbot-renew` odnawia certyfikat cyklicznie,
+- frontend sam przeladowuje nginx po zmianie certyfikatu.
+
+Uwaga: do czasu wydania certyfikatu `443` moze chwile zwracac `connection refused`, a `80` powinien dzialac od razu.
 
 ### Panel admina
 
