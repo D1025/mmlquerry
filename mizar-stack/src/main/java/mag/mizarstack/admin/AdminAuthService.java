@@ -22,7 +22,11 @@ public class AdminAuthService {
             this.expectedHashBytes = null;
             return;
         }
-        this.expectedHashBytes = sha256(normalizedPassword);
+        if (SHA256_HEX_PATTERN.matcher(normalizedPassword).matches()) {
+            this.expectedHashBytes = HexFormat.of().parseHex(normalizedPassword.toLowerCase(Locale.ROOT));
+        } else {
+            this.expectedHashBytes = sha256(normalizedPassword);
+        }
     }
 
     public boolean isConfigured() {
@@ -34,11 +38,13 @@ public class AdminAuthService {
             return false;
         }
         String token = extractToken(authorizationHeader);
-        if (!SHA256_HEX_PATTERN.matcher(token).matches()) {
+        if (token.isBlank()) {
             return false;
         }
         try {
-            byte[] provided = HexFormat.of().parseHex(token.toLowerCase(Locale.ROOT));
+            byte[] provided = SHA256_HEX_PATTERN.matcher(token).matches()
+                    ? HexFormat.of().parseHex(token.toLowerCase(Locale.ROOT))
+                    : sha256(token);
             return MessageDigest.isEqual(expectedHashBytes, provided);
         } catch (IllegalArgumentException ignored) {
             return false;

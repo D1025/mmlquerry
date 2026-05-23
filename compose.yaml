@@ -73,6 +73,8 @@ services:
       GITHUB_REPO: ${GITHUB_REPO}
       GITHUB_TOKEN: ${GITHUB_TOKEN}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      APP_CORS_ALLOWED_ORIGINS: ${APP_CORS_ALLOWED_ORIGINS:-http://localhost:5173,https://159.89.106.226}
+      SERVER_FORWARD_HEADERS_STRATEGY: ${SERVER_FORWARD_HEADERS_STRATEGY:-framework}
     expose:
       - "8080"
     depends_on:

@@ -58,9 +58,7 @@ function isAuthFailureMessage(message: string): boolean {
     normalized.includes('invalid admin authorization') ||
     normalized.includes('admin password is not configured') ||
     normalized.includes('unauthorized') ||
-    normalized.includes('forbidden') ||
-    normalized.includes('http 401') ||
-    normalized.includes('http 403')
+    normalized.includes('http 401')
   )
 }
 
