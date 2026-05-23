@@ -54,6 +54,7 @@ public class IngestService {
     private final String ghRepo;
     private final String ghToken;
     private final int timeoutMs;
+    private final int zipTimeoutMs;
 
     private final DocumentDao documentDao;
     private final DocumentVersionDao documentVersionDao;
@@ -66,6 +67,7 @@ public class IngestService {
             @Value("${app.github.repo:}") String ghRepo,
             @Value("${app.github.token:}") String ghToken,
             @Value("${app.http.timeoutMs:15000}") int timeoutMs,
+            @Value("${app.github.zipTimeoutMs:1800000}") int zipTimeoutMs,
             EsxMmlMapperService esxMapper,
             DocumentDao documentDao,
             DocumentVersionDao documentVersionDao,
@@ -77,6 +79,7 @@ public class IngestService {
         this.ghRepo = ghRepo;
         this.ghToken = ghToken;
         this.timeoutMs = timeoutMs;
+        this.zipTimeoutMs = zipTimeoutMs;
         this.esxMapper = esxMapper;
         this.documentDao = documentDao;
         this.documentVersionDao = documentVersionDao;
@@ -239,9 +242,10 @@ public class IngestService {
 
     private HttpResponse<InputStream> downloadZipball(String ref) throws IOException, InterruptedException {
         String zipballUrl = "https://api.github.com/repos/%s/zipball/%s".formatted(ghRepo, ref);
+        int effectiveZipTimeoutMs = Math.max(Math.max(timeoutMs, zipTimeoutMs), 120_000);
         HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(zipballUrl))
                 .GET()
-                .timeout(Duration.ofMillis(Math.max(timeoutMs, 120_000)));
+                .timeout(Duration.ofMillis(effectiveZipTimeoutMs));
         
         if (ghToken != null && !ghToken.isBlank()) {
             builder.header("Authorization", "Bearer " + ghToken);
