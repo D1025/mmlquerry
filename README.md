@@ -85,21 +85,17 @@ Szczegolowy runbook pod Linux jest w `DEPLOY_LINUX.md`. Ponizej masz skrocona we
 
 ### 1) Lokalnie (dev, bez publicznego HTTPS)
 
-Ten wariant jest najlepszy do codziennej pracy: baza i storage w Dockerze, backend i frontend odpalane lokalnie.
+Ten wariant jest najlepszy do codziennej pracy: backend + baza + storage w Dockerze, frontend w `npm run dev`.
 
 ```bash
 # 1. Konfiguracja
 cp .env.template .env
 
-# 2. Infrastruktura (DB + MinIO)
-docker compose up -d postgres minio minio-init
+# 2. Backend + infrastruktura (Docker)
+docker compose up -d --build postgres minio minio-init app
 
-# 3. Backend
-cd mizar-stack
-./gradlew bootRun
-
-# 4. Frontend (drugi terminal)
-cd ../mml-querry-frontend
+# 3. Frontend DEV (drugi terminal)
+cd mml-querry-frontend
 npm ci
 npm run dev -- --host 0.0.0.0 --port 5173
 ```
@@ -107,6 +103,10 @@ npm run dev -- --host 0.0.0.0 --port 5173
 Adresy:
 - Frontend: `http://localhost:5173`
 - Backend API: `http://localhost:8080`
+
+Uwagi:
+- W trybie dev frontend uzywa `/api` i Vite proxy do `http://localhost:8080`, wiec lokalnie nie wpadasz w problemy CORS.
+- Gdy chcesz wymusic bezposredni adres API w dev, ustaw `VITE_DEV_ALLOW_ABSOLUTE_API=true`.
 
 ### 2) Serwer bez domeny (HTTPS na publicznym IP)
 

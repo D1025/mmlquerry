@@ -1,4 +1,24 @@
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, '') ?? 'http://localhost:8080'
+function resolveApiBaseUrl(): string {
+  const configured = import.meta.env.VITE_API_BASE_URL?.trim()
+  const normalized = configured?.replace(/\/$/, '') ?? ''
+
+  if (import.meta.env.DEV) {
+    const allowAbsoluteInDev = String(import.meta.env.VITE_DEV_ALLOW_ABSOLUTE_API ?? '')
+      .toLowerCase()
+      .trim() === 'true'
+
+    if (normalized.startsWith('/')) {
+      return normalized
+    }
+    if (!normalized || !allowAbsoluteInDev) {
+      return '/api'
+    }
+  }
+
+  return normalized || '/api'
+}
+
+const API_BASE_URL = resolveApiBaseUrl()
 
 export type AdminOperationStatus = 'QUEUED' | 'RUNNING' | 'SUCCESS' | 'FAILED'
 

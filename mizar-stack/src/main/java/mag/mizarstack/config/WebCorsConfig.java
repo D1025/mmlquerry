@@ -10,10 +10,19 @@ import java.util.Arrays;
 @Configuration
 public class WebCorsConfig implements WebMvcConfigurer {
 
-    private final String[] allowedOrigins;
+    private static final String[] DEFAULT_ALLOWED_ORIGIN_PATTERNS = new String[]{
+            "http://localhost:*",
+            "http://127.0.0.1:*",
+            "https://localhost:*",
+            "https://127.0.0.1:*"
+    };
 
-    public WebCorsConfig(@Value("${app.cors.allowed-origins:http://localhost:5173}") String allowedOriginsRaw) {
-        this.allowedOrigins = Arrays.stream(allowedOriginsRaw.split(","))
+    private final String[] allowedOriginPatterns;
+
+    public WebCorsConfig(
+            @Value("${app.cors.allowed-origins:http://localhost:*,http://127.0.0.1:*}") String allowedOriginsRaw
+    ) {
+        this.allowedOriginPatterns = Arrays.stream(allowedOriginsRaw.split(","))
                 .map(String::trim)
                 .filter(s -> !s.isBlank())
                 .toArray(String[]::new);
@@ -22,7 +31,11 @@ public class WebCorsConfig implements WebMvcConfigurer {
     @Override
     public void addCorsMappings(CorsRegistry registry) {
         registry.addMapping("/**")
-                .allowedOrigins(allowedOrigins.length == 0 ? new String[]{"http://localhost:5173"} : allowedOrigins)
+                .allowedOriginPatterns(
+                        allowedOriginPatterns.length == 0
+                                ? DEFAULT_ALLOWED_ORIGIN_PATTERNS
+                                : allowedOriginPatterns
+                )
                 .allowedMethods("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
                 .allowedHeaders("*")
                 .maxAge(3600);
