@@ -197,29 +197,37 @@ public class QueryEvaluationService {
         String sql = switch (node.getListType()) {
             case THEOREMS -> """
                     select vt.item_id, vt.lib_id, vt.article_name, vt.kind,
-                           vt.subkind, vt.text_content, vt.node_type
+                           vt.subkind, vt.text_content, vt.node_type,
+                           coalesce(rn.details -> 'attrs' ->> 'position', cast(rn.pos as text)) as text_position
                     from view_theorems vt
+                    left join view_item_root_nodes rn on rn.item_id = vt.item_id
                     where :source = '*'
                        or vt.article_name = :source
                     """;
             case DEFINITIONS -> """
                     select vd.item_id, vd.lib_id, vd.article_name, vd.kind,
-                           vd.subkind, vd.text_content, vd.node_type
+                           vd.subkind, vd.text_content, vd.node_type,
+                           coalesce(rn.details -> 'attrs' ->> 'position', cast(rn.pos as text)) as text_position
                     from view_definitions vd
+                    left join view_item_root_nodes rn on rn.item_id = vd.item_id
                     where :source = '*'
                        or vd.article_name = :source
                     """;
             case STATEMENTS -> """
                     select vs.item_id, vs.lib_id, vs.article_name, vs.kind,
-                           vs.subkind, vs.text_content, vs.node_type
+                           vs.subkind, vs.text_content, vs.node_type,
+                           coalesce(rn.details -> 'attrs' ->> 'position', cast(rn.pos as text)) as text_position
                     from view_statements vs
+                    left join view_item_root_nodes rn on rn.item_id = vs.item_id
                     where :source = '*'
                        or vs.article_name = :source
                     """;
             case REGISTRATIONS -> """
                     select vr.item_id, vr.lib_id, vr.article_name, vr.kind,
-                           vr.subkind, vr.text_content, vr.node_type
+                           vr.subkind, vr.text_content, vr.node_type,
+                           coalesce(rn.details -> 'attrs' ->> 'position', cast(rn.pos as text)) as text_position
                     from view_registrations vr
+                    left join view_item_root_nodes rn on rn.item_id = vr.item_id
                     where :source = '*'
                        or vr.article_name = :source
                     """;
@@ -232,6 +240,7 @@ public class QueryEvaluationService {
                            vi.kind,
                            vi.subkind,
                            vi.text_content,
+                           coalesce(rn.details -> 'attrs' ->> 'position', cast(rn.pos as text)) as text_position,
                            case
                                when vi.kind = 'statement' and vi.subkind = 'th' then 'theorems'
                                when vi.kind = 'statement' and vi.subkind in ('def', 'dfs') then 'definitions'
@@ -240,6 +249,7 @@ public class QueryEvaluationService {
                                else vi.kind
                             end as node_type
                     from view_items vi
+                    left join view_item_root_nodes rn on rn.item_id = vi.id
                     where :source = '*'
                        or vi.article_name = :source
                     """;
@@ -274,29 +284,37 @@ public class QueryEvaluationService {
         String baseSql = switch (listType) {
             case THEOREMS -> """
                     select vt.item_id, vt.lib_id, vt.article_name, vt.kind,
-                           vt.subkind, vt.text_content, vt.node_type
+                           vt.subkind, vt.text_content, vt.node_type,
+                           coalesce(rn.details -> 'attrs' ->> 'position', cast(rn.pos as text)) as text_position
                     from view_theorems vt
+                    left join view_item_root_nodes rn on rn.item_id = vt.item_id
                     where :source = '*'
                        or vt.article_name = :source
                     """;
             case DEFINITIONS -> """
                     select vd.item_id, vd.lib_id, vd.article_name, vd.kind,
-                           vd.subkind, vd.text_content, vd.node_type
+                           vd.subkind, vd.text_content, vd.node_type,
+                           coalesce(rn.details -> 'attrs' ->> 'position', cast(rn.pos as text)) as text_position
                     from view_definitions vd
+                    left join view_item_root_nodes rn on rn.item_id = vd.item_id
                     where :source = '*'
                        or vd.article_name = :source
                     """;
             case STATEMENTS -> """
                     select vs.item_id, vs.lib_id, vs.article_name, vs.kind,
-                           vs.subkind, vs.text_content, vs.node_type
+                           vs.subkind, vs.text_content, vs.node_type,
+                           coalesce(rn.details -> 'attrs' ->> 'position', cast(rn.pos as text)) as text_position
                     from view_statements vs
+                    left join view_item_root_nodes rn on rn.item_id = vs.item_id
                     where :source = '*'
                        or vs.article_name = :source
                     """;
             case REGISTRATIONS -> """
                     select vr.item_id, vr.lib_id, vr.article_name, vr.kind,
-                           vr.subkind, vr.text_content, vr.node_type
+                           vr.subkind, vr.text_content, vr.node_type,
+                           coalesce(rn.details -> 'attrs' ->> 'position', cast(rn.pos as text)) as text_position
                     from view_registrations vr
+                    left join view_item_root_nodes rn on rn.item_id = vr.item_id
                     where :source = '*'
                        or vr.article_name = :source
                     """;
@@ -307,6 +325,7 @@ public class QueryEvaluationService {
                            vi.kind,
                            vi.subkind,
                            vi.text_content,
+                           coalesce(rn.details -> 'attrs' ->> 'position', cast(rn.pos as text)) as text_position,
                            case
                                when vi.kind = 'statement' and vi.subkind = 'th' then 'theorems'
                                when vi.kind = 'statement' and vi.subkind in ('def', 'dfs') then 'definitions'
@@ -315,6 +334,7 @@ public class QueryEvaluationService {
                                else vi.kind
                             end as node_type
                     from view_items vi
+                    left join view_item_root_nodes rn on rn.item_id = vi.id
                     where :source = '*'
                        or vi.article_name = :source
                     """;
@@ -427,11 +447,21 @@ public class QueryEvaluationService {
                     Map.entry("kind", "q.kind"),
                     Map.entry("subkind", "q.subkind"),
                     Map.entry("node_type", "q.node_type"),
-                    Map.entry("text_position", "q.text_position"),
                     Map.entry("raw", "q.text_content"),
                     Map.entry("raw_text", "q.text_content"),
                     Map.entry("text_content", "q.text_content")
             );
+            if ("position".equals(normalizedSortBy) || "text_position".equals(normalizedSortBy)) {
+                return new SortResolution(
+                        buildPositionOrderClause(
+                                "q.text_position",
+                                direction,
+                                "q.spelling asc, q.article_name asc, q.lib_id asc, q.item_id asc"
+                        ),
+                        "text_position",
+                        direction
+                );
+            }
             String expression = symbolSortColumns.get(normalizedSortBy);
             if (expression != null) {
                 return new SortResolution(expression + " " + direction + " nulls last", normalizedSortBy, direction);
@@ -452,14 +482,45 @@ public class QueryEvaluationService {
                 Map.entry("raw", "q.text_content"),
                 Map.entry("raw_text", "q.text_content"),
                 Map.entry("text_content", "q.text_content"),
-                Map.entry("text_position", "q.text_content")
+                Map.entry("position", "q.text_position")
         );
+        if ("position".equals(normalizedSortBy) || "text_position".equals(normalizedSortBy)) {
+            return new SortResolution(
+                    buildPositionOrderClause(
+                            "q.text_position",
+                            direction,
+                            "q.article_name asc, q.lib_id asc, q.item_id asc"
+                    ),
+                    "text_position",
+                    direction
+            );
+        }
         String expression = entitySortColumns.get(normalizedSortBy);
         if (expression != null) {
             return new SortResolution(expression + " " + direction + " nulls last", normalizedSortBy, direction);
         }
 
         return new SortResolution("q.article_name asc, q.lib_id asc, q.item_id asc", "article_name", "asc");
+    }
+
+    private String buildPositionOrderClause(String positionExpression, String direction, String fallbackClause) {
+        String normalizedExpression = "replace(trim(coalesce(" + positionExpression + ", '')), chr(92), '/')"; // 92 => '\'
+        String lineOrder = """
+                case
+                    when %s ~ '^[0-9]+/[0-9]+$' then split_part(%s, '/', 1)::bigint
+                    else 9223372036854775807
+                end
+                """.formatted(normalizedExpression, normalizedExpression).replace('\n', ' ').trim();
+        String columnOrder = """
+                case
+                    when %s ~ '^[0-9]+/[0-9]+$' then split_part(%s, '/', 2)::bigint
+                    else 9223372036854775807
+                end
+                """.formatted(normalizedExpression, normalizedExpression).replace('\n', ' ').trim();
+
+        return lineOrder + " " + direction + " nulls last, "
+                + columnOrder + " " + direction + " nulls last, "
+                + fallbackClause;
     }
 
     private QueryResult visitArticleQuery(ArticleQueryNode node) {

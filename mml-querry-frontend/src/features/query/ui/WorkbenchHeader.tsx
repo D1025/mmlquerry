@@ -51,7 +51,7 @@ export function WorkbenchHeader({
           <Stack spacing={0.1}>
             <Typography variant="h4">Mizar Query Workbench</Typography>
             <Typography variant="caption" color="text.secondary">
-              Edytor zapytan i analiza wynikow MML
+              Edytor zapytań i analiza wyników MML
             </Typography>
           </Stack>
         </Stack>
@@ -75,7 +75,7 @@ export function WorkbenchHeader({
             startIcon={<MenuBookRoundedIcon fontSize="small" />}
             onClick={() => onNavigate('examples')}
           >
-            Przyklady
+            Przykłady
           </Button>
           <Button
             size="small"

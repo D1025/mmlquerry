@@ -1,5 +1,6 @@
 package mag.mizarstack.admin;
 
+import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -17,19 +18,36 @@ public class AdminOperationManager {
 
     private static final int MAX_LOG_LINES = 2_500;
     private static final int MAX_OPERATIONS = 60;
+    private static final long HEARTBEAT_INTERVAL_SECONDS = 20L;
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
         Thread thread = new Thread(r, "admin-ingest-worker");
         thread.setDaemon(true);
         return thread;
     });
+    private final ScheduledExecutorService streamHeartbeatExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread thread = new Thread(r, "admin-stream-heartbeat");
+        thread.setDaemon(true);
+        return thread;
+    });
 
     private final Map<String, OperationState> operations = new ConcurrentHashMap<>();
     private final Deque<String> order = new ConcurrentLinkedDeque<>();
+    private final Map<String, Consumer<AdminOperationEvent>> subscribers = new ConcurrentHashMap<>();
 
     @FunctionalInterface
     public interface AdminOperationAction {
         Map<String, Object> run(String operationId) throws Exception;
+    }
+
+    @PostConstruct
+    void startHeartbeat() {
+        streamHeartbeatExecutor.scheduleAtFixedRate(
+                this::publishHeartbeat,
+                HEARTBEAT_INTERVAL_SECONDS,
+                HEARTBEAT_INTERVAL_SECONDS,
+                TimeUnit.SECONDS
+        );
     }
 
     public AdminOperationSnapshot start(String type, AdminOperationAction action) {
@@ -39,9 +57,26 @@ public class AdminOperationManager {
         operations.put(id, state);
         order.addFirst(id);
         trimOldOperations();
+        publishOperationUpdate(state.snapshot());
 
         executor.submit(() -> executeOperation(state, action));
         return state.snapshot();
+    }
+
+    public String subscribe(Consumer<AdminOperationEvent> subscriber) {
+        if (subscriber == null) {
+            throw new IllegalArgumentException("Subscriber is required.");
+        }
+        String subscriptionId = UUID.randomUUID().toString();
+        subscribers.put(subscriptionId, subscriber);
+        return subscriptionId;
+    }
+
+    public void unsubscribe(String subscriptionId) {
+        if (subscriptionId == null || subscriptionId.isBlank()) {
+            return;
+        }
+        subscribers.remove(subscriptionId);
     }
 
     public Consumer<String> progressLogger(String operationId) {
@@ -86,31 +121,38 @@ public class AdminOperationManager {
             return;
         }
         state.appendLog(message);
+        publishOperationUpdate(state.snapshot());
     }
 
     @PreDestroy
     public void shutdown() {
         executor.shutdownNow();
+        streamHeartbeatExecutor.shutdownNow();
+        subscribers.clear();
     }
 
     private void executeOperation(OperationState state, AdminOperationAction action) {
         state.setStatus(AdminOperationStatus.RUNNING);
         state.setStartedAt(Instant.now());
-        state.appendLog("Operation started.");
+        publishOperationUpdate(state.snapshot());
+        appendLog(state.id, "Operation started.");
 
         try {
             Map<String, Object> result = action.run(state.id);
             state.setResult(result == null ? Map.of() : result);
             state.setStatus(AdminOperationStatus.SUCCESS);
-            state.appendLog("Operation completed successfully.");
+            publishOperationUpdate(state.snapshot());
+            appendLog(state.id, "Operation completed successfully.");
         } catch (Exception ex) {
             String error = ex.getMessage() == null ? ex.getClass().getSimpleName() : ex.getMessage();
             state.setError(error);
             state.setStatus(AdminOperationStatus.FAILED);
-            state.appendLog("Operation failed: " + error);
+            publishOperationUpdate(state.snapshot());
+            appendLog(state.id, "Operation failed: " + error);
             log.error("Admin operation {} failed", state.id, ex);
         } finally {
             state.setFinishedAt(Instant.now());
+            publishOperationUpdate(state.snapshot());
         }
     }
 
@@ -129,6 +171,35 @@ public class AdminOperationManager {
             return "unknown";
         }
         return type.trim().toLowerCase(Locale.ROOT);
+    }
+
+    private void publishOperationUpdate(AdminOperationSnapshot snapshot) {
+        if (snapshot == null) {
+            return;
+        }
+        publishEvent(AdminOperationEvent.operation(snapshot));
+    }
+
+    private void publishHeartbeat() {
+        publishEvent(AdminOperationEvent.heartbeat());
+    }
+
+    private void publishEvent(AdminOperationEvent event) {
+        if (event == null || subscribers.isEmpty()) {
+            return;
+        }
+        List<String> staleSubscribers = new ArrayList<>();
+        subscribers.forEach((subscriptionId, subscriber) -> {
+            try {
+                subscriber.accept(event);
+            } catch (RuntimeException ex) {
+                staleSubscribers.add(subscriptionId);
+                log.debug("Removing stale admin stream subscriber {}", subscriptionId, ex);
+            }
+        });
+        for (String staleSubscriber : staleSubscribers) {
+            subscribers.remove(staleSubscriber);
+        }
     }
 
     private static final class OperationState {

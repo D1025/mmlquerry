@@ -30,7 +30,6 @@ public class EsxMmlMapperService {
     private static final String TEXT_PROPER_XPATH =
             "//*[translate(local-name(), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ')='TEXT-PROPER']";
 
-    // Prefer exact-case match used in ESX files (<Item ...>)
     private static final String ITEM_XPATH = "//Item";
     private static final Set<String> DEFINITION_ITEM_KINDS = Set.of(
             "definition-item",

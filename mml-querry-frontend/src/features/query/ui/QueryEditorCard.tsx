@@ -95,14 +95,14 @@ export function QueryEditorCard({
                 size="small"
                 color={hasErrors ? 'error' : 'success'}
                 variant={hasErrors ? 'filled' : 'outlined'}
-                label={hasErrors ? `${validation.errors.length} bledow` : 'Query OK'}
+                label={hasErrors ? `${validation.errors.length} błędów` : 'Query OK'}
               />
               {validation.warnings.length > 0 && (
                 <Chip
                   size="small"
                   color="warning"
                   variant="outlined"
-                  label={`${validation.warnings.length} ostrzezen`}
+                  label={`${validation.warnings.length} ostrzeżeń`}
                 />
               )}
             </Stack>
@@ -227,7 +227,7 @@ export function QueryEditorCard({
               Przerwij zapytanie
             </Button>
             <Button variant="outlined" startIcon={<MenuBookRoundedIcon />} onClick={onOpenExamples}>
-              Biblioteka przykladow
+              Biblioteka przykładów
             </Button>
           </Stack>
         </Stack>

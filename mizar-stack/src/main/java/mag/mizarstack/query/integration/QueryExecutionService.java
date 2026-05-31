@@ -13,6 +13,8 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @Service
 @RequiredArgsConstructor
@@ -20,6 +22,7 @@ public class QueryExecutionService {
 
     private static final int DEFAULT_PAGE_SIZE = 10;
     private static final int MAX_PAGE_SIZE = 500;
+    private static final Pattern TEXT_POSITION_PATTERN = Pattern.compile("^\\s*(\\d+)\\s*[\\\\/]\\s*(\\d+)\\s*$");
 
     private final QueryParser queryParser;
     private final QueryProcessingPipeline queryProcessingPipeline;
@@ -163,10 +166,48 @@ public class QueryExecutionService {
             String sortBy,
             String sortDirection
     ) {
+        if (isTextPositionSort(sortBy)) {
+            String leftPosition = left == null ? null : safeString(left.get("text_position"));
+            String rightPosition = right == null ? null : safeString(right.get("text_position"));
+            int compared = compareTextPositions(leftPosition, rightPosition);
+            return "desc".equals(sortDirection) ? -compared : compared;
+        }
+
         Object leftValue = left == null ? null : left.get(sortBy);
         Object rightValue = right == null ? null : right.get(sortBy);
         int compared = compareValues(leftValue, rightValue);
         return "desc".equals(sortDirection) ? -compared : compared;
+    }
+
+    private boolean isTextPositionSort(String sortBy) {
+        if (sortBy == null) {
+            return false;
+        }
+        String normalized = sortBy.trim().toLowerCase(Locale.ROOT);
+        return "position".equals(normalized) || "text_position".equals(normalized);
+    }
+
+    private int compareTextPositions(String left, String right) {
+        PositionParts leftParts = parseTextPosition(left);
+        PositionParts rightParts = parseTextPosition(right);
+        return leftParts.compareTo(rightParts);
+    }
+
+    private PositionParts parseTextPosition(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return PositionParts.MISSING;
+        }
+        Matcher matcher = TEXT_POSITION_PATTERN.matcher(raw);
+        if (!matcher.matches()) {
+            return PositionParts.MISSING;
+        }
+        try {
+            long line = Long.parseLong(matcher.group(1));
+            long column = Long.parseLong(matcher.group(2));
+            return new PositionParts(line, column, false);
+        } catch (NumberFormatException ignored) {
+            return PositionParts.MISSING;
+        }
     }
 
     private int compareValues(Object leftValue, Object rightValue) {
@@ -277,5 +318,24 @@ public class QueryExecutionService {
             String sortDirection,
             String filter
     ) {
+    }
+
+    private record PositionParts(long line, long column, boolean missing) implements Comparable<PositionParts> {
+        private static final PositionParts MISSING = new PositionParts(Long.MAX_VALUE, Long.MAX_VALUE, true);
+
+        @Override
+        public int compareTo(PositionParts other) {
+            if (other == null) {
+                return -1;
+            }
+            if (missing != other.missing) {
+                return missing ? 1 : -1;
+            }
+            int lineComparison = Long.compare(line, other.line);
+            if (lineComparison != 0) {
+                return lineComparison;
+            }
+            return Long.compare(column, other.column);
+        }
     }
 }

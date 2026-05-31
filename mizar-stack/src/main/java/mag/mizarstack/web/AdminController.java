@@ -2,6 +2,8 @@ package mag.mizarstack.web;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import jakarta.servlet.http.HttpServletResponse;
+import mag.mizarstack.admin.AdminOperationEvent;
 import mag.mizarstack.admin.AdminAuthService;
 import mag.mizarstack.admin.AdminOperationManager;
 import mag.mizarstack.admin.AdminOperationSnapshot;
@@ -9,13 +11,18 @@ import mag.mizarstack.ingest.dto.DownloadResult;
 import mag.mizarstack.ingest.dto.FullIngestResult;
 import mag.mizarstack.ingest.dto.IndexResult;
 import mag.mizarstack.ingest.service.IngestService;
+import org.springframework.http.MediaType;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.server.ResponseStatusException;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.io.IOException;
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 @Slf4j
 @RestController
@@ -87,6 +94,31 @@ public class AdminController {
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Operacja nie istnieje."));
     }
 
+    @GetMapping(path = "/operations/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter streamOperations(
+            @RequestParam(defaultValue = "30") int limit,
+            HttpServletResponse response
+    ) {
+        response.setHeader("Cache-Control", "no-cache");
+        response.setHeader("Connection", "keep-alive");
+        response.setHeader("X-Accel-Buffering", "no");
+
+        SseEmitter emitter = new SseEmitter(0L);
+        String subscriptionId = operationManager.subscribe(event -> sendStreamEvent(emitter, event));
+
+        emitter.onCompletion(() -> operationManager.unsubscribe(subscriptionId));
+        emitter.onTimeout(() -> {
+            operationManager.unsubscribe(subscriptionId);
+            emitter.complete();
+        });
+        emitter.onError(error -> operationManager.unsubscribe(subscriptionId));
+
+        if (!sendBootstrapEvent(emitter, limit)) {
+            operationManager.unsubscribe(subscriptionId);
+        }
+        return emitter;
+    }
+
     private static Map<String, Object> toDownloadMap(DownloadResult result) {
         Map<String, Object> map = new LinkedHashMap<>();
         map.put("tagName", result.tagName());
@@ -131,5 +163,47 @@ public class AdminController {
                 snapshot.result(),
                 snapshot.error()
         );
+    }
+
+    private boolean sendBootstrapEvent(SseEmitter emitter, int limit) {
+        List<AdminOperationSnapshot> operations = operationManager.list(limit).stream()
+                .map(AdminController::toSummary)
+                .toList();
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("type", "bootstrap");
+        payload.put("serverTime", Instant.now().toString());
+        payload.put("operations", operations);
+
+        try {
+            emitter.send(SseEmitter.event()
+                    .id(UUID.randomUUID().toString())
+                    .name("bootstrap")
+                    .data(payload));
+            return true;
+        } catch (IOException ex) {
+            emitter.completeWithError(ex);
+            return false;
+        }
+    }
+
+    private void sendStreamEvent(SseEmitter emitter, AdminOperationEvent event) {
+        if (event == null) {
+            return;
+        }
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("type", event.type());
+        payload.put("serverTime", event.emittedAt());
+        if (event.operation() != null) {
+            payload.put("operation", event.operation());
+        }
+
+        try {
+            emitter.send(SseEmitter.event()
+                    .id(UUID.randomUUID().toString())
+                    .name(event.type())
+                    .data(payload));
+        } catch (IOException ex) {
+            throw new IllegalStateException("Unable to deliver admin stream event.", ex);
+        }
     }
 }

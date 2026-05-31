@@ -197,7 +197,7 @@ function App() {
     const appName = 'Mizar Query Workbench'
 
     if (pageRoute === 'examples') {
-      document.title = `Przyklady | ${appName}`
+      document.title = `Przykłady | ${appName}`
       return
     }
     if (pageRoute === 'admin') {
@@ -218,7 +218,7 @@ function App() {
       return
     }
 
-    document.title = `Edytor zapytan | ${appName}`
+    document.title = `Edytor zapytań | ${appName}`
   }, [executeStatus, page, pageRoute, result?.count, result?.page, result?.size, rowsPerPage])
 
   const updateSuggestionPosition = useCallback(() => {
@@ -572,6 +572,11 @@ function App() {
     [buildExecuteRequest, dispatch, preloadForwardPages, readCachedResponse, saveCachedResponse],
   )
 
+  const dispatchPagedQueryRef = useRef(dispatchPagedQuery)
+  useEffect(() => {
+    dispatchPagedQueryRef.current = dispatchPagedQuery
+  }, [dispatchPagedQuery])
+
   const handleCancelQuery = useCallback(() => {
     activeQueryRequestRef.current?.abort()
     activeQueryRequestRef.current = null
@@ -619,10 +624,10 @@ function App() {
     const timeout = window.setTimeout(() => {
       setPage(0)
       resetExpandedState()
-      dispatchPagedQuery(activeQuery, { page: 0, filter: filterText })
+      dispatchPagedQueryRef.current(activeQuery, { page: 0, filter: filterText })
     }, 300)
     return () => window.clearTimeout(timeout)
-  }, [dispatchPagedQuery, filterText, result?.query])
+  }, [filterText, result?.query])
 
   useEffect(() => {
     if (pageRoute !== 'editor' || pendingEditorCursor === null) {
@@ -648,7 +653,7 @@ function App() {
       const response = await fetchItemFragment(itemId)
       setExpandedRawByRowKey((current) => ({ ...current, [rowKey]: response.raw ?? '' }))
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Nie udalo sie pobrac pelnego fragmentu XML.'
+      const message = error instanceof Error ? error.message : 'Nie udało się pobrać pełnego fragmentu XML.'
       setExpandedRawErrorByRowKey((current) => ({ ...current, [rowKey]: message }))
     } finally {
       setExpandedRawLoadingByRowKey((current) => ({ ...current, [rowKey]: false }))

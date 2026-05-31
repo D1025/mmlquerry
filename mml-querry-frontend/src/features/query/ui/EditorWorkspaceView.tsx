@@ -44,8 +44,8 @@ export function EditorWorkspaceView({
             <IconButton
               size="small"
               onClick={onToggleSyntaxPanel}
-              aria-label="Zwin panel skladni"
-              title="Zwin panel skladni"
+              aria-label="Zwiń panel składni"
+              title="Zwiń panel składni"
             >
               <ChevronRightRoundedIcon fontSize="small" />
             </IconButton>
@@ -70,8 +70,8 @@ export function EditorWorkspaceView({
           <IconButton
             size="small"
             onClick={onToggleSyntaxPanel}
-            aria-label="Rozwin panel skladni"
-            title="Rozwin panel skladni"
+            aria-label="Rozwiń panel składni"
+            title="Rozwiń panel składni"
           >
             <ChevronLeftRoundedIcon fontSize="small" />
           </IconButton>

@@ -23,14 +23,14 @@ export function ExamplesLibraryView({
             sx={{ justifyContent: 'space-between', alignItems: { xs: 'flex-start', sm: 'center' } }}
           >
             <Stack spacing={0.2}>
-              <Typography variant="h6">Biblioteka przykladowych zapytan</Typography>
+              <Typography variant="h6">Biblioteka przykładowych zapytań</Typography>
               <Typography variant="body2" color="text.secondary">
-                Kazdy wpis ma opis i gotowe query. Uzyj przycisku przy tytule elementu, aby
-                przejsc do edytora z uzupelnionym zapytaniem.
+                Każdy wpis ma opis i gotowe query. Użyj przycisku przy tytule elementu, aby
+                przejść do edytora z uzupełnionym zapytaniem.
               </Typography>
             </Stack>
             <Button variant="outlined" startIcon={<PlayArrowRoundedIcon />} onClick={onBackToEditor}>
-              Wroc do edytora
+              Wróć do edytora
             </Button>
           </Stack>
 
@@ -67,7 +67,7 @@ export function ExamplesLibraryView({
                             onClick={() => onUseQuery(example.query)}
                             sx={{ minWidth: 0, px: 1.25 }}
                           >
-                            Uzyj
+                            Użyj
                           </Button>
                         </Stack>
                         <Typography variant="body2" color="text.secondary">

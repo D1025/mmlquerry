@@ -15,7 +15,7 @@ const KEYWORD_HELP: Record<string, string> = {
   'main mode': 'Pipeline: przechodzi do głównego mode.',
   'main functor': 'Pipeline: przechodzi do głównego funktora.',
   nodes:
-    'Pipeline: wybiera nody XML i pozwala filtrować potomków przez where/has/redefine. Sciezki: A/B (dziecko), A//B (dowolna glebia), A/3/B (dokladna glebia).',
+    'Pipeline: wybiera nody XML i pozwala filtrować potomków przez where/has/redefine. Ścieżki: A/B (dziecko), A//B (dowolna głębia), A/3/B (dokładna głębia).',
   reverse: 'Pipeline: odwraca kolejność wyników.',
   invert: 'Pipeline: odwraca kolejność wyników (alias reverse).',
   whereeq: 'Pipeline: filtruje po dokładnej liczbie wyników operacji, np. whereeq(ref,2).',
