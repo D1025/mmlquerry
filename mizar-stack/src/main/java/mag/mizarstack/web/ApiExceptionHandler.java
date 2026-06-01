@@ -7,6 +7,7 @@ import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
+import java.io.IOException;
 import java.time.Instant;
 import java.util.Map;
 
@@ -36,6 +37,11 @@ public class ApiExceptionHandler {
 
     @ExceptionHandler(Exception.class)
     public ResponseEntity<Map<String, Object>> handleAny(Exception ex) {
+        if (isClientDisconnected(ex)) {
+            log.debug("Client disconnected during response write: {}", ex.getMessage());
+            return ResponseEntity.status(HttpStatus.NO_CONTENT).build();
+        }
+
         log.error("Unhandled exception", ex);
 
         Map<String, Object> body = Map.of(
@@ -44,5 +50,39 @@ public class ApiExceptionHandler {
                 "message", ex.getMessage() == null ? ex.getClass().getName() : ex.getMessage()
         );
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(body);
+    }
+
+    private static boolean isClientDisconnected(Throwable ex) {
+        Throwable current = ex;
+        while (current != null) {
+            String className = current.getClass().getName();
+            if (className.contains("ClientAbortException")) {
+                return true;
+            }
+
+            if (current instanceof IOException) {
+                String message = current.getMessage();
+                if (message != null) {
+                    String normalized = message.toLowerCase();
+                    if (normalized.contains("broken pipe")
+                            || normalized.contains("connection reset by peer")
+                            || normalized.contains("forcibly closed by the remote host")) {
+                        return true;
+                    }
+                }
+            }
+
+            String message = current.getMessage();
+            if (message != null) {
+                String normalized = message.toLowerCase();
+                if (normalized.contains("broken pipe")
+                        || normalized.contains("connection reset by peer")
+                        || normalized.contains("forcibly closed by the remote host")) {
+                    return true;
+                }
+            }
+            current = current.getCause();
+        }
+        return false;
     }
 }

@@ -4,6 +4,7 @@ import lombok.RequiredArgsConstructor;
 import mag.mizarstack.query.eval.AstJsonSerializer;
 import mag.mizarstack.query.integration.QueryExecutionService;
 import mag.mizarstack.query.integration.QueryItemFragmentService;
+import mag.mizarstack.query.integration.QueryVersionService;
 import mag.mizarstack.query.integration.QueryWarmupService;
 import mag.mizarstack.xml_names.ESXAttributeName;
 import mag.mizarstack.xml_names.ESXElementName;
@@ -26,6 +27,7 @@ public class QueryController {
     private final QueryWarmupService queryWarmupService;
     private final QueryItemFragmentService queryItemFragmentService;
     private final AstJsonSerializer astJsonSerializer;
+    private final QueryVersionService queryVersionService;
 
     @PostMapping("/execute")
     public Map<String, Object> execute(@RequestBody ExecuteQueryRequest request) {
@@ -38,7 +40,8 @@ public class QueryController {
                 request.size(),
                 request.sortBy(),
                 request.sortDirection(),
-                request.filter()
+                request.filter(),
+                request.version()
         );
         QueryExecutionService.QueryExecutionOutcome outcome = queryExecutionService.execute(request.query(), true, pageRequest);
         QueryExecutionService.QueryExecutionMetrics metrics = outcome.metrics();
@@ -53,6 +56,7 @@ public class QueryController {
         response.put("sortBy", outcome.sortBy());
         response.put("sortDirection", outcome.sortDirection());
         response.put("filter", outcome.filter());
+        response.put("version", outcome.version());
         response.put("returnedCount", outcome.responseItems().size());
         response.put("items", outcome.responseItems());
         response.put("timing", Map.of(
@@ -145,6 +149,26 @@ public class QueryController {
         );
     }
 
+    @GetMapping("/versions")
+    public Map<String, Object> versions() {
+        QueryVersionService.QueryVersionOverview overview = queryVersionService.loadOverview();
+        List<Map<String, Object>> versions = overview.versions().stream()
+                .map(version -> {
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    row.put("version", version.version());
+                    row.put("articleCount", version.articleCount());
+                    row.put("itemCount", version.itemCount());
+                    row.put("lastIndexedAt", version.lastIndexedAt());
+                    return row;
+                })
+                .toList();
+
+        return Map.of(
+                "defaultVersion", overview.defaultVersion(),
+                "versions", versions
+        );
+    }
+
     @GetMapping("/items/{itemId}/fragment")
     public Map<String, Object> itemFragment(@PathVariable UUID itemId) {
         QueryItemFragmentService.ItemFragment fragment = queryItemFragmentService.fetchItemFragment(itemId);
@@ -163,7 +187,8 @@ public class QueryController {
             Integer size,
             String sortBy,
             String sortDirection,
-            String filter
+            String filter,
+            String version
     ) {
     }
 

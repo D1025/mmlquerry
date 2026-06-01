@@ -1,4 +1,4 @@
-import MenuBookRoundedIcon from '@mui/icons-material/MenuBookRounded'
+﻿import MenuBookRoundedIcon from '@mui/icons-material/MenuBookRounded'
 import PlayArrowRoundedIcon from '@mui/icons-material/PlayArrowRounded'
 import StopRoundedIcon from '@mui/icons-material/StopRounded'
 import {
@@ -78,8 +78,6 @@ export function QueryEditorCard({
   onCancelQuery,
   onOpenExamples,
 }: QueryEditorCardProps) {
-  const hasErrors = validation.errors.length > 0
-
   return (
     <Card sx={{ borderRadius: 1 }}>
       <CardContent sx={{ p: { xs: 2, md: 2.5 }, '&:last-child': { pb: { xs: 2, md: 2.5 } } }}>
@@ -91,18 +89,15 @@ export function QueryEditorCard({
           >
             <Typography variant="h6">Query editor</Typography>
             <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: 'wrap' }}>
-              <Chip
-                size="small"
-                color={hasErrors ? 'error' : 'success'}
-                variant={hasErrors ? 'filled' : 'outlined'}
-                label={hasErrors ? `${validation.errors.length} bledow` : 'Query OK'}
-              />
+              {validation.errors.length > 0 && (
+                <Chip size="small" color="error" variant="filled" label={`${validation.errors.length} błędów`} />
+              )}
               {validation.warnings.length > 0 && (
                 <Chip
                   size="small"
                   color="warning"
                   variant="outlined"
-                  label={`${validation.warnings.length} ostrzezen`}
+                  label={`${validation.warnings.length} ostrzeżeń`}
                 />
               )}
             </Stack>
@@ -227,7 +222,7 @@ export function QueryEditorCard({
               Przerwij zapytanie
             </Button>
             <Button variant="outlined" startIcon={<MenuBookRoundedIcon />} onClick={onOpenExamples}>
-              Biblioteka przykladow
+              Biblioteka przykładów
             </Button>
           </Stack>
         </Stack>

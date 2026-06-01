@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert,
   Box,
@@ -18,6 +18,7 @@ import {
   fetchAdminOperation,
   fetchAdminOperations,
   getAdminStatus,
+  openAdminOperationsStream,
   sha256Hex,
   startAdminDownload,
   startAdminFull,
@@ -26,6 +27,9 @@ import {
 
 const ADMIN_TOKEN_STORAGE_KEY = 'mizar.query.adminTokenHash'
 const DEFAULT_INDEX_PREFIX = 'mizar-esx/releases'
+const STREAM_RECONNECT_BASE_DELAY_MS = 1_000
+const STREAM_RECONNECT_MAX_DELAY_MS = 10_000
+const OPERATIONS_LIST_LIMIT = 30
 
 function isOperationRunning(status: AdminOperationSnapshot['status'] | undefined): boolean {
   return status === 'QUEUED' || status === 'RUNNING'
@@ -62,6 +66,28 @@ function isAuthFailureMessage(message: string): boolean {
   )
 }
 
+function toOperationSummary(operation: AdminOperationSnapshot): AdminOperationSnapshot {
+  return {
+    ...operation,
+    logs: [],
+  }
+}
+
+function upsertOperationSummary(
+  current: AdminOperationSnapshot[],
+  operation: AdminOperationSnapshot,
+): AdminOperationSnapshot[] {
+  const normalizedOperation = toOperationSummary(operation)
+  const withoutPrevious = current.filter((item) => item.id !== normalizedOperation.id)
+  const merged = [normalizedOperation, ...withoutPrevious]
+  merged.sort((a, b) => {
+    const left = Date.parse(a.queuedAt ?? '')
+    const right = Date.parse(b.queuedAt ?? '')
+    return (Number.isFinite(right) ? right : 0) - (Number.isFinite(left) ? left : 0)
+  })
+  return merged.slice(0, OPERATIONS_LIST_LIMIT)
+}
+
 export function AdminPanelView() {
   const [password, setPassword] = useState('')
   const [tokenHash, setTokenHash] = useState<string>(() => {
@@ -78,9 +104,11 @@ export function AdminPanelView() {
   const [selectedOperation, setSelectedOperation] = useState<AdminOperationSnapshot | null>(null)
   const [operationsLoading, setOperationsLoading] = useState(false)
   const [operationsError, setOperationsError] = useState<string | null>(null)
+  const [streamConnected, setStreamConnected] = useState(false)
   const [actionLoading, setActionLoading] = useState<'download' | 'index' | 'full' | null>(null)
   const [indexPrefix, setIndexPrefix] = useState(DEFAULT_INDEX_PREFIX)
   const [indexPrefixError, setIndexPrefixError] = useState<string | null>(null)
+  const selectedOperationIdRef = useRef(selectedOperationId)
 
   const isAuthenticated = tokenHash.trim().length > 0
   const hasRunningOperation = isOperationRunning(selectedOperation?.status)
@@ -89,8 +117,12 @@ export function AdminPanelView() {
     if (!selectedOperation) {
       return 'Brak wybranej operacji'
     }
-    return `${selectedOperation.type.toUpperCase()} • ${selectedOperation.id}`
+    return `${selectedOperation.type.toUpperCase()} | ${selectedOperation.id}`
   }, [selectedOperation])
+
+  useEffect(() => {
+    selectedOperationIdRef.current = selectedOperationId
+  }, [selectedOperationId])
 
   const persistToken = (nextToken: string) => {
     try {
@@ -114,15 +146,16 @@ export function AdminPanelView() {
         const details = await fetchAdminOperation(authToken, operationId)
         setSelectedOperation(details)
       } catch (error) {
-        const message = error instanceof Error ? error.message : 'Nie udalo sie pobrac szczegolow operacji.'
+        const message = error instanceof Error ? error.message : 'Nie udało się pobrać szczegółów operacji.'
         setOperationsError(message)
         if (isAuthFailureMessage(message)) {
           setTokenHash('')
           persistToken('')
           setSelectedOperation(null)
           setOperations([])
+          selectedOperationIdRef.current = ''
           setSelectedOperationId('')
-          setAuthError('Sesja administratora wygasla. Zaloguj sie ponownie.')
+          setAuthError('Sesja administratora wygasła. Zaloguj się ponownie.')
         }
       }
     },
@@ -141,12 +174,14 @@ export function AdminPanelView() {
       setOperationsLoading(true)
       setOperationsError(null)
       try {
-        const response = await fetchAdminOperations(authToken, 30)
+        const response = await fetchAdminOperations(authToken, OPERATIONS_LIST_LIMIT)
         setOperations(response.items)
+        const currentSelectedId = selectedOperationIdRef.current
         const nextSelectedId =
-          keepSelection && selectedOperationId && response.items.some((item) => item.id === selectedOperationId)
-            ? selectedOperationId
+          keepSelection && currentSelectedId && response.items.some((item) => item.id === currentSelectedId)
+            ? currentSelectedId
             : response.items[0]?.id ?? ''
+        selectedOperationIdRef.current = nextSelectedId
         setSelectedOperationId(nextSelectedId)
         if (nextSelectedId) {
           await loadOperationDetails(nextSelectedId, authToken)
@@ -154,46 +189,124 @@ export function AdminPanelView() {
           setSelectedOperation(null)
         }
       } catch (error) {
-        const message = error instanceof Error ? error.message : 'Nie udalo sie pobrac listy operacji.'
+        const message = error instanceof Error ? error.message : 'Nie udało się pobrać listy operacji.'
         setOperationsError(message)
         if (isAuthFailureMessage(message)) {
           setTokenHash('')
           persistToken('')
           setSelectedOperation(null)
           setOperations([])
+          selectedOperationIdRef.current = ''
           setSelectedOperationId('')
-          setAuthError('Sesja administratora wygasla. Zaloguj sie ponownie.')
+          setAuthError('Sesja administratora wygasła. Zaloguj się ponownie.')
         }
       } finally {
         setOperationsLoading(false)
       }
     },
-    [loadOperationDetails, selectedOperationId],
+    [loadOperationDetails],
   )
 
   useEffect(() => {
     if (!isAuthenticated) {
+      setStreamConnected(false)
       return
     }
+
     void loadOperations(tokenHash, false)
-  }, [isAuthenticated, loadOperations, tokenHash])
+    let closed = false
+    let reconnectTimeoutId: number | null = null
+    let reconnectAttempt = 0
+    let closeStream: (() => void) | null = null
 
-  useEffect(() => {
-    if (!isAuthenticated || !selectedOperationId) {
-      return
+    const scheduleReconnect = () => {
+      if (closed) {
+        return
+      }
+      reconnectAttempt += 1
+      const delay = Math.min(
+        STREAM_RECONNECT_BASE_DELAY_MS * 2 ** Math.max(0, reconnectAttempt - 1),
+        STREAM_RECONNECT_MAX_DELAY_MS,
+      )
+      reconnectTimeoutId = window.setTimeout(() => {
+        reconnectTimeoutId = null
+        connectStream()
+      }, delay)
     }
 
-    const intervalId = window.setInterval(() => {
-      void loadOperationDetails(selectedOperationId, tokenHash)
-    }, 1500)
+    const connectStream = () => {
+      if (closed) {
+        return
+      }
+      closeStream?.()
+      closeStream = openAdminOperationsStream(tokenHash, {
+        limit: OPERATIONS_LIST_LIMIT,
+        onOpen: () => {
+          reconnectAttempt = 0
+          setStreamConnected(true)
+        },
+        onEvent: (event) => {
+          if (event.type === 'bootstrap') {
+            const incomingOperations = Array.isArray(event.operations) ? event.operations : []
+            setOperations(incomingOperations)
+            if (!selectedOperationIdRef.current && incomingOperations.length > 0) {
+              const firstOperation = incomingOperations[0]
+              selectedOperationIdRef.current = firstOperation.id
+              setSelectedOperationId(firstOperation.id)
+              void loadOperationDetails(firstOperation.id, tokenHash)
+            }
+            return
+          }
 
-    return () => window.clearInterval(intervalId)
-  }, [isAuthenticated, loadOperationDetails, selectedOperationId, tokenHash])
+          if (event.type === 'operation' && event.operation) {
+            const updatedOperation = event.operation
+            setOperations((previous) => upsertOperationSummary(previous, updatedOperation))
+
+            if (!selectedOperationIdRef.current) {
+              selectedOperationIdRef.current = updatedOperation.id
+              setSelectedOperationId(updatedOperation.id)
+            }
+
+            if (selectedOperationIdRef.current === updatedOperation.id) {
+              setSelectedOperation(updatedOperation)
+            }
+          }
+        },
+        onError: (error) => {
+          setStreamConnected(false)
+          const message = error.message ?? 'Połączenie stream zostało przerwane.'
+          if (isAuthFailureMessage(message)) {
+            setTokenHash('')
+            persistToken('')
+            setSelectedOperation(null)
+            setOperations([])
+            selectedOperationIdRef.current = ''
+            setSelectedOperationId('')
+            setAuthError('Sesja administratora wygasła. Zaloguj się ponownie.')
+            return
+          }
+          setOperationsError(message)
+          scheduleReconnect()
+        },
+      })
+    }
+
+    connectStream()
+
+    return () => {
+      closed = true
+      setStreamConnected(false)
+      if (reconnectTimeoutId !== null) {
+        window.clearTimeout(reconnectTimeoutId)
+      }
+      closeStream?.()
+    }
+  }, [isAuthenticated, loadOperationDetails, loadOperations, tokenHash])
 
   const handleLogin = async () => {
     const trimmed = password.trim()
     if (!trimmed) {
-      setAuthError('Podaj haslo administratora.')
+      setAuthError('Podaj hasło administratora.')
       return
     }
 
@@ -203,14 +316,14 @@ export function AdminPanelView() {
       const hash = await sha256Hex(trimmed)
       const status = await getAdminStatus(hash)
       if (!status.configured) {
-        throw new Error('Haslo administratora nie jest skonfigurowane na backendzie.')
+        throw new Error('Hasło administratora nie jest skonfigurowane na backendzie.')
       }
       setTokenHash(hash)
       persistToken(hash)
       setPassword('')
       await loadOperations(hash, false)
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Logowanie nie powiodlo sie.'
+      const message = error instanceof Error ? error.message : 'Logowanie nie powiodło się.'
       setAuthError(message)
       setTokenHash('')
       persistToken('')
@@ -223,10 +336,12 @@ export function AdminPanelView() {
     setTokenHash('')
     persistToken('')
     setOperations([])
+    selectedOperationIdRef.current = ''
     setSelectedOperationId('')
     setSelectedOperation(null)
     setOperationsError(null)
     setAuthError(null)
+    setStreamConnected(false)
   }
 
   const runAction = async (
@@ -243,9 +358,8 @@ export function AdminPanelView() {
       setSelectedOperationId(operation.id)
       setSelectedOperation(operation)
       await loadOperations(tokenHash)
-      await loadOperationDetails(operation.id, tokenHash)
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Operacja zakonczona bledem.'
+      const message = error instanceof Error ? error.message : 'Operacja zakończona błędem.'
       setOperationsError(message)
       if (isAuthFailureMessage(message)) {
         handleLogout()
@@ -292,11 +406,11 @@ export function AdminPanelView() {
             {!isAuthenticated && (
               <Stack spacing={1.5}>
                 <Typography variant="body2" color="text.secondary">
-                  Zaloguj sie haslem administratora, aby uruchamiac pobieranie do S3 i indeksowanie.
+                  Zaloguj się hasłem administratora, aby uruchamiać pobieranie do S3 i indeksowanie.
                 </Typography>
                 <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.25}>
                   <TextField
-                    label="Haslo admina"
+                    label="Hasło admina"
                     type="password"
                     size="small"
                     fullWidth
@@ -373,7 +487,7 @@ export function AdminPanelView() {
                     onClick={() => void runAction('full', () => startAdminFull(tokenHash))}
                     sx={{ minHeight: 40, px: 2, whiteSpace: 'nowrap' }}
                   >
-                    {actionLoading === 'full' ? 'Uruchamianie...' : 'Pelny ingest'}
+                    {actionLoading === 'full' ? 'Uruchamianie...' : 'Pełny ingest'}
                   </Button>
                 </Stack>
 
@@ -382,6 +496,12 @@ export function AdminPanelView() {
                     size="small"
                     variant="outlined"
                     label={`Operacje: ${operations.length}`}
+                  />
+                  <Chip
+                    size="small"
+                    color={streamConnected ? 'success' : 'default'}
+                    variant={streamConnected ? 'filled' : 'outlined'}
+                    label={streamConnected ? 'Stream: online' : 'Stream: reconnecting'}
                   />
                   {selectedOperation && (
                     <Chip
@@ -397,7 +517,7 @@ export function AdminPanelView() {
                     disabled={operationsLoading}
                     sx={{ minHeight: 32, whiteSpace: 'nowrap' }}
                   >
-                    Odswiez
+                    Odśwież
                   </Button>
                 </Stack>
 
@@ -409,7 +529,7 @@ export function AdminPanelView() {
                   <TextField
                     select
                     size="small"
-                    label="Wybierz operacje"
+                    label="Wybierz operację"
                     value={selectedOperationId}
                     onChange={(event) => {
                       const nextId = event.target.value
@@ -465,7 +585,7 @@ export function AdminPanelView() {
                       >
                         {selectedOperation.logs.length > 0
                           ? selectedOperation.logs.join('\n')
-                          : 'Brak logow dla tej operacji.'}
+                          : 'Brak logów dla tej operacji.'}
                       </Box>
 
                       <Box

@@ -14,6 +14,7 @@ public class MappedMmlItem {
     public String subKind;
     public int number;
     public String libId;
+    public String versionTag;
     public String title;
     public String textContent;
     public String rawXml;

@@ -45,9 +45,9 @@ export function SyntaxGuideCard({
       >
         <Stack spacing={2} sx={{ minHeight: '100%' }}>
           <Stack spacing={0.2}>
-            <Typography variant="h6">Skladnia i operacje</Typography>
+            <Typography variant="h6">Składnia i operacje</Typography>
             <Typography variant="body2" color="text.secondary">
-              Kliknij element, zeby wstawic go w miejscu kursora.
+              Kliknij element, żeby wstawić go w miejscu kursora.
             </Typography>
           </Stack>
 
@@ -121,7 +121,7 @@ export function SyntaxGuideCard({
                 </Stack>
                 {(syntax?.supportedAttributeNames?.length ?? 0) > 12 && (
                   <Button size="small" sx={{ mt: 1 }} onClick={onToggleAllAttributes}>
-                    {showAllAttributes ? 'Pokaz mniej' : 'Pokaz wszystkie'}
+                    {showAllAttributes ? 'Pokaż mniej' : 'Pokaż wszystkie'}
                   </Button>
                 )}
               </AccordionDetails>
@@ -154,7 +154,7 @@ export function SyntaxGuideCard({
                 </Stack>
                 {(syntax?.supportedNodeNames?.length ?? 0) > 14 && (
                   <Button size="small" sx={{ mt: 1 }} onClick={onToggleAllNodes}>
-                    {showAllNodes ? 'Pokaz mniej' : 'Pokaz wszystkie'}
+                    {showAllNodes ? 'Pokaż mniej' : 'Pokaż wszystkie'}
                   </Button>
                 )}
               </AccordionDetails>

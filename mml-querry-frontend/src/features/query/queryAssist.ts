@@ -274,13 +274,13 @@ function validatePairs(query: string): string[] {
 
   const errors: string[] = []
   if (singleQuoteOpen || doubleQuoteOpen) {
-    errors.push('Niedomkniety cudzyslow lub apostrof w zapytaniu.')
+    errors.push('Niedomknięty cudzysłów lub apostrof w zapytaniu.')
   }
   if (bracketDepth !== 0) {
-    errors.push('Niedomkniety nawias kwadratowy [] w zapytaniu.')
+    errors.push('Niedomknięty nawias kwadratowy [] w zapytaniu.')
   }
   if (parenDepth !== 0) {
-    errors.push('Niedomkniety nawias okragly () w zapytaniu.')
+    errors.push('Niedomknięty nawias okrągły () w zapytaniu.')
   }
   return errors
 }
@@ -309,7 +309,7 @@ function validateSyntaxShape(query: string): string[] {
   }
 
   if (/^\|/.test(trimmed) || /\|$/.test(trimmed)) {
-    errors.push('Znak "|" nie moze byc na poczatku ani na koncu zapytania.')
+    errors.push('Znak "|" nie może być na początku ani na końcu zapytania.')
   }
   if (/\|\s*\|/.test(trimmed)) {
     errors.push('Wykryto podwojony operator pipeline "||".')
@@ -323,7 +323,7 @@ function validateSyntaxShape(query: string): string[] {
   const first = tokens[0]
   if (first === 'list') {
     if (tokens[1] !== 'of') {
-      errors.push('Po "list" oczekiwano slowa "of".')
+      errors.push('Po "list" oczekiwano słowa "of".')
     }
     if (!tokens[2]) {
       errors.push('Brakuje typu listy po "list of".')
@@ -332,13 +332,13 @@ function validateSyntaxShape(query: string): string[] {
     }
   } else if (first === 'occurrences') {
     if (tokens[1] !== 'of') {
-      errors.push('Po "occurrences" oczekiwano slowa "of".')
+      errors.push('Po "occurrences" oczekiwano słowa "of".')
     }
     if (!tokens[2] || !['symbol', 'symbols'].includes(tokens[2])) {
       errors.push('Zapytanie "occurrences" wymaga frazy "occurrences of symbols".')
     }
   } else if (first !== 'article') {
-    errors.push('Zapytanie powinno zaczynac sie od "list", "occurrences" albo "article".')
+    errors.push('Zapytanie powinno zaczynać się od "list", "occurrences" albo "article".')
   }
 
   for (let i = 0; i < tokens.length; i += 1) {
@@ -348,18 +348,18 @@ function validateSyntaxShape(query: string): string[] {
 
     if (CONNECTOR_KEYWORDS.has(token)) {
       if (!next || !prev || CONNECTOR_KEYWORDS.has(next) || CONNECTOR_KEYWORDS.has(prev)) {
-        errors.push(`Operator "${token}" jest uzyty w niepoprawnym miejscu.`)
+        errors.push(`Operator "${token}" jest użyty w niepoprawnym miejscu.`)
       }
     }
 
     if (token === 'where' || token === 'has' || token === 'nodes' || token === 'in') {
       if (!next) {
-        errors.push(`Po "${token}" brakuje dalszej czesci zapytania.`)
+        errors.push(`Po "${token}" brakuje dalszej części zapytania.`)
       } else if (
         (token === 'where' && DISALLOWED_AFTER_WHERE.has(next))
         || (token !== 'where' && DISALLOWED_AFTER_KEYWORD.has(next))
       ) {
-        errors.push(`Po "${token}" oczekiwano wyrazenia, a znaleziono "${next}".`)
+        errors.push(`Po "${token}" oczekiwano wyrażenia, a znaleziono "${next}".`)
       }
     }
   }
@@ -409,7 +409,7 @@ function validateKeywordTypos(query: string, syntax: SyntaxResponse | null): str
       continue
     }
     seen.add(token)
-    warnings.push(`Mozliwa literowka: "${rawToken}" (czy chodzilo o "${closest}"?)`)
+    warnings.push(`Możliwa literówka: "${rawToken}" (czy chodziło o "${closest}"?)`)
     if (warnings.length >= 4) {
       break
     }
@@ -665,7 +665,7 @@ function validateKnownNodeNames(query: string, syntax: SyntaxResponse | null): s
       }
       const closest = findClosestNodeName(part, supportedNodeNames)
       if (closest) {
-        errors.push(`Nieznana nazwa noda: "${part}". Mozliwe, ze chodzilo o "${closest}".`)
+        errors.push(`Nieznana nazwa noda: "${part}". Możliwe, że chodziło o "${closest}".`)
       } else {
         errors.push(`Nieznana nazwa noda: "${part}".`)
       }

@@ -51,17 +51,20 @@ public class EsxMmlJpaDao {
     private final EntityManager entityManager;
 
     @Transactional
-    public UpsertResult upsertArticle(String articleName, String s3Key, String xmlContent) {
-        acquireTransactionLock("article:" + safeLockToken(articleName));
-        Optional<Article> existing = articleRepository.findByName(articleName);
+    public UpsertResult upsertArticle(String articleName, String s3Key, String xmlContent, String versionTag) {
+        String normalizedVersionTag = normalizeVersionTag(versionTag);
+        acquireTransactionLock("article:" + safeLockToken(articleName) + ":" + safeLockToken(normalizedVersionTag));
+        Optional<Article> existing = articleRepository.findByNameAndVersionTag(articleName, normalizedVersionTag);
         boolean inserted = existing.isEmpty();
         Article article = existing.orElseGet(() -> Article.builder()
                 .id(UUID.randomUUID())
                 .name(articleName)
+                .versionTag(normalizedVersionTag)
                 .createdAt(Instant.now())
                 .build());
 
         article.setFilePath(s3Key);
+        article.setVersionTag(normalizedVersionTag);
         article.setXmlContent(xmlContent);
         if (article.getCreatedAt() == null) {
             article.setCreatedAt(Instant.now());
@@ -84,7 +87,10 @@ public class EsxMmlJpaDao {
     private UpsertResult upsertMmlItemLocked(UUID articleId, MappedMmlItem it) {
 
         if (it.libId != null && !it.libId.isBlank()) {
-            List<MmlItem> existingByLib = mmlItemRepository.findAllByLibIdOrderByIdAsc(it.libId);
+            List<MmlItem> existingByLib = mmlItemRepository.findAllByVersionTagAndLibIdOrderByIdAsc(
+                    normalizeVersionTag(it.versionTag),
+                    it.libId
+            );
             if (!existingByLib.isEmpty()) {
                 MmlItem existingItem = existingByLib.get(0);
                 boolean kindMismatch = existingItem.getKind() != null
@@ -130,14 +136,14 @@ public class EsxMmlJpaDao {
     private List<String> buildItemUpsertLockKeys(UUID articleId, MappedMmlItem it) {
         List<String> keys = new ArrayList<>(2);
         if (it.libId != null && !it.libId.isBlank()) {
-            keys.add("lib:" + it.libId);
+            keys.add("lib:" + safeLockToken(it.versionTag) + ":" + it.libId);
         }
         if (it.subKind != null && !it.subKind.isBlank() && it.number > 0) {
-            keys.add("canon:" + articleId + ":" + it.subKind + ":" + it.number);
+            keys.add("canon:" + safeLockToken(it.versionTag) + ":" + articleId + ":" + it.subKind + ":" + it.number);
         }
         if (keys.isEmpty()) {
             // Stable fallback keeps lock effective for repeated attempts of the same shape.
-            keys.add("fallback:" + articleId + ":" + safeLockToken(it.kind) + ":" + safeLockToken(it.subKind) + ":" + it.number);
+            keys.add("fallback:" + safeLockToken(it.versionTag) + ":" + articleId + ":" + safeLockToken(it.kind) + ":" + safeLockToken(it.subKind) + ":" + it.number);
         }
         keys.sort(String::compareTo);
         return keys;
@@ -163,6 +169,13 @@ public class EsxMmlJpaDao {
 
     private static String safeLockToken(String value) {
         return (value == null || value.isBlank()) ? "_" : value;
+    }
+
+    private static String normalizeVersionTag(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return "legacy";
+        }
+        return raw.trim();
     }
 
     private static long advisoryLockKey(String key) {
@@ -202,6 +215,7 @@ public class EsxMmlJpaDao {
         target.setKind(source.kind);
         target.setSubkind(source.subKind);
         target.setNumber(source.number);
+        target.setVersionTag(normalizeVersionTag(source.versionTag));
         if (includeLibId) {
             target.setLibId(source.libId);
         }

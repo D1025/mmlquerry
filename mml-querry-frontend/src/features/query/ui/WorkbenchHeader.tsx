@@ -1,17 +1,38 @@
-import MenuBookRoundedIcon from '@mui/icons-material/MenuBookRounded'
+﻿import MenuBookRoundedIcon from '@mui/icons-material/MenuBookRounded'
 import ManageAccountsRoundedIcon from '@mui/icons-material/ManageAccountsRounded'
 import TerminalRoundedIcon from '@mui/icons-material/TerminalRounded'
-import { AppBar, Button, Stack, Toolbar, Typography } from '@mui/material'
+import {
+  AppBar,
+  Button,
+  FormControl,
+  InputLabel,
+  MenuItem,
+  Select,
+  Stack,
+  Toolbar,
+  Typography,
+} from '@mui/material'
+import type { QueryVersionOption } from '../queryApi'
 import type { AppPage } from '../queryWorkbenchUtils'
 
 interface WorkbenchHeaderProps {
   pageRoute: AppPage
   onNavigate: (page: AppPage) => void
+  versionOptions: QueryVersionOption[]
+  selectedVersion: string
+  versionStatus: 'idle' | 'loading' | 'succeeded' | 'failed'
+  versionError: string | null
+  onVersionChange: (version: string) => void
 }
 
 export function WorkbenchHeader({
   pageRoute,
   onNavigate,
+  versionOptions,
+  selectedVersion,
+  versionStatus,
+  versionError,
+  onVersionChange,
 }: WorkbenchHeaderProps) {
   return (
     <AppBar
@@ -51,7 +72,7 @@ export function WorkbenchHeader({
           <Stack spacing={0.1}>
             <Typography variant="h4">Mizar Query Workbench</Typography>
             <Typography variant="caption" color="text.secondary">
-              Edytor zapytan i analiza wynikow MML
+              Edytor zapytań i analiza wyników MML
             </Typography>
           </Stack>
         </Stack>
@@ -75,7 +96,7 @@ export function WorkbenchHeader({
             startIcon={<MenuBookRoundedIcon fontSize="small" />}
             onClick={() => onNavigate('examples')}
           >
-            Przyklady
+            Przykłady
           </Button>
           <Button
             size="small"
@@ -85,6 +106,32 @@ export function WorkbenchHeader({
           >
             Admin
           </Button>
+          <FormControl size="small" sx={{ minWidth: 220 }}>
+            <InputLabel id="header-version-select-label">Wersja danych</InputLabel>
+            <Select
+              labelId="header-version-select-label"
+              label="Wersja danych"
+              value={selectedVersion || ''}
+              onChange={(event) => onVersionChange(event.target.value)}
+              disabled={versionStatus === 'loading' || versionOptions.length === 0}
+            >
+              {!selectedVersion && (
+                <MenuItem value="">
+                  <em>Domyślna</em>
+                </MenuItem>
+              )}
+              {versionOptions.map((versionOption) => (
+                <MenuItem key={versionOption.version} value={versionOption.version}>
+                  {versionOption.version} ({versionOption.itemCount})
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+          {versionError && (
+            <Typography variant="caption" color="error.main" sx={{ maxWidth: 240 }}>
+              Błąd wersji: {versionError}
+            </Typography>
+          )}
         </Stack>
       </Toolbar>
     </AppBar>

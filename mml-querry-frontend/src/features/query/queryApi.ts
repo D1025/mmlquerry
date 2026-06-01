@@ -11,6 +11,7 @@ export interface ExecuteQueryResponse {
   ast: unknown
   description: string
   count: number
+  version?: string | null
   page?: number
   size?: number
   sortBy?: string | null
@@ -23,6 +24,7 @@ export interface ExecuteQueryResponse {
 
 export interface ExecuteQueryRequest {
   query: string
+  version?: string
   page?: number
   size?: number
   sortBy?: string
@@ -47,12 +49,14 @@ export interface QueryItem {
   node_id?: string
   node_path?: string
   lib_id?: string
+  mml_ids?: string
   article_name?: string
   node_type?: string
   text_position?: string
   raw?: string
   spelling?: string
   occurrences?: number
+  MMLId?: string
 }
 
 export interface ItemFragmentResponse {
@@ -81,6 +85,18 @@ function resolveApiBaseUrl(): string {
   }
 
   return normalized || '/api'
+}
+
+export interface QueryVersionOption {
+  version: string
+  articleCount: number
+  itemCount: number
+  lastIndexedAt?: string | null
+}
+
+export interface QueryVersionsResponse {
+  defaultVersion: string
+  versions: QueryVersionOption[]
 }
 
 const API_BASE_URL = resolveApiBaseUrl()
@@ -118,6 +134,11 @@ async function parseResponse<T>(response: Response): Promise<T> {
 export async function getSyntax(): Promise<SyntaxResponse> {
   const response = await fetch(`${API_BASE_URL}/query/syntax`)
   return parseResponse<SyntaxResponse>(response)
+}
+
+export async function getQueryVersions(): Promise<QueryVersionsResponse> {
+  const response = await fetch(`${API_BASE_URL}/query/versions`)
+  return parseResponse<QueryVersionsResponse>(response)
 }
 
 export async function executeQuery(

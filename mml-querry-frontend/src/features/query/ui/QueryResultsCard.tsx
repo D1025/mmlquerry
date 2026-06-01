@@ -87,7 +87,7 @@ export function QueryResultsCard({
               <Typography variant="h6">Wyniki</Typography>
             </Stack>
             <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: 'wrap' }}>
-              <Chip size="small" variant="outlined" label={result ? `${result.count} rekordow` : '0 rekordow'} />
+              <Chip size="small" variant="outlined" label={result ? `${result.count} rekordów` : '0 rekordów'} />
               {result && (
                 <Chip size="small" variant="outlined" label={`${result.items.length} na stronie`} />
               )}
@@ -113,7 +113,7 @@ export function QueryResultsCard({
               <Stack spacing={1}>
                 <Typography variant="subtitle2">Brak wyniku</Typography>
                 <Typography variant="body2" color="text.secondary">
-                  Wpisz query albo wybierz przyklad, a potem uruchom zapytanie.
+                  Wpisz query albo wybierz przykład, a potem uruchom zapytanie.
                 </Typography>
               </Stack>
             </Paper>
@@ -139,11 +139,11 @@ export function QueryResultsCard({
               />
 
               <Typography variant="caption" color="text.secondary">
-                Pokazano {result.items.length} z {result.count} rekordow
+                Pokazano {result.items.length} z {result.count} rekordów
               </Typography>
 
               {result.items.length === 0 && (
-                <Alert severity="info">Zapytanie zwrocilo pusty wynik.</Alert>
+                <Alert severity="info">Zapytanie zwróciło pusty wynik.</Alert>
               )}
 
               {result.items.length > 0 && (
@@ -242,7 +242,7 @@ export function QueryResultsCard({
                                         }}
                                       >
                                         <Typography variant="caption" color="text.secondary">
-                                          Pelny fragment XML
+                                          Pełny fragment XML
                                         </Typography>
                                         {expandedRawLoading && <CircularProgress size={18} sx={{ mt: 1 }} />}
                                         {!expandedRawLoading && expandedRawError && (

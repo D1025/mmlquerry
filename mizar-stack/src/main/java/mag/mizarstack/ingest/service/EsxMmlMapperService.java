@@ -30,7 +30,6 @@ public class EsxMmlMapperService {
     private static final String TEXT_PROPER_XPATH =
             "//*[translate(local-name(), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ')='TEXT-PROPER']";
 
-    // Prefer exact-case match used in ESX files (<Item ...>)
     private static final String ITEM_XPATH = "//Item";
     private static final Set<String> DEFINITION_ITEM_KINDS = Set.of(
             "definition-item",
@@ -187,10 +186,12 @@ public class EsxMmlMapperService {
             m.accept("Starting mapping for " + (s3Key == null ? "raw-bytes" : s3Key));
 
             String fallbackArticle = deriveArticleNameFromS3Key(s3Key);
+            String versionTag = deriveVersionTagFromS3Key(s3Key);
             UUID fallbackArticleId = upsertArticle(
                     fallbackArticle,
                     s3Key,
                     new String(xmlBytes, StandardCharsets.UTF_8),
+                    versionTag,
                     insertStats
             );
 
@@ -205,7 +206,7 @@ public class EsxMmlMapperService {
 
             // Streaming SAX ingestion that is namespace/case safe.
             // We extract each <Item> subtree as XML and map it to DB.
-            ingestItemsSax(xmlBytes, s3Key, currentArticleId, currentArticleName,
+            ingestItemsSax(xmlBytes, s3Key, versionTag, currentArticleId, currentArticleName,
                     parsedItems, failedItems, itemSequence, libIdToItem, pendingRelations, symbolCache, formatCache, insertStats, m);
 
             if (parsedItems.get() == 0) {
@@ -284,6 +285,7 @@ public class EsxMmlMapperService {
     private void ingestItemsSax(
             byte[] xmlBytes,
             String s3Key,
+            String versionTag,
             AtomicReference<UUID> currentArticleId,
             AtomicReference<String> currentArticleName,
             AtomicInteger parsedItems,
@@ -331,7 +333,13 @@ public class EsxMmlMapperService {
                         String article = attrIgnoreCase(attributes, "articleid");
                         if (article != null && !article.isBlank()) {
                             try {
-                                UUID aid = upsertArticle(article, s3Key, new String(xmlBytes, StandardCharsets.UTF_8), insertStats);
+                                UUID aid = upsertArticle(
+                                        article,
+                                        s3Key,
+                                        new String(xmlBytes, StandardCharsets.UTF_8),
+                                        versionTag,
+                                        insertStats
+                                );
                                 currentArticleId.set(aid);
                                 currentArticleName.set(article);
                                 m.accept("Article detected from Text-Proper: " + article + " (id=" + aid + ")");
@@ -393,6 +401,7 @@ public class EsxMmlMapperService {
                                     itemXmlSnapshot,
                                     xmlBytes,
                                     s3Key,
+                                    versionTag,
                                     itemSequenceSnapshot,
                                     articleIdSnapshot,
                                     articleNameSnapshot,
@@ -459,6 +468,7 @@ public class EsxMmlMapperService {
             String itemXml,
             byte[] xmlBytes,
             String s3Key,
+            String versionTag,
             int itemSequence,
             UUID articleIdHint,
             String articleNameHint,
@@ -488,6 +498,7 @@ public class EsxMmlMapperService {
                                 deriveArticleNameFromS3Key(s3Key),
                                 s3Key,
                                 new String(xmlBytes, StandardCharsets.UTF_8),
+                                versionTag,
                                 insertStats
                         );
                         currentArticleId.compareAndSet(null, articleId);
@@ -497,7 +508,7 @@ public class EsxMmlMapperService {
                         currentArticleName.compareAndSet(null, articleName);
                     }
 
-                    MappedMmlItem statementItem = extractItem(itemEl, articleName, itemSequence);
+                    MappedMmlItem statementItem = extractItem(itemEl, articleName, versionTag, itemSequence);
                     UUID statementItemId = upsertMmlItem(articleId, statementItem, insertStats);
 
                     if (statementItem.libId != null && !statementItem.libId.isBlank()) {
@@ -526,13 +537,26 @@ public class EsxMmlMapperService {
 
                     String itemKind = Optional.ofNullable(itemEl.attributeValue("kind")).orElse("");
                     if (isDefinitionItemKind(itemKind)) {
-                        processDefinitionItem(itemEl, itemKind, articleId, articleName, statementItemId, libIdToItem, pendingRelations, symbolCache, formatCache, insertStats);
+                        processDefinitionItem(
+                                itemEl,
+                                itemKind,
+                                articleId,
+                                articleName,
+                                versionTag,
+                                statementItemId,
+                                libIdToItem,
+                                pendingRelations,
+                                symbolCache,
+                                formatCache,
+                                insertStats
+                        );
                     }
                     if (isRegistrationItemKind(itemKind) || isDefinitionContainerItemKind(itemKind)) {
                         processRegistrationItem(
                                 itemEl,
                                 articleId,
                                 articleName,
+                                versionTag,
                                 libIdToItem,
                                 pendingRelations,
                                 symbolCache,
@@ -681,8 +705,14 @@ public class EsxMmlMapperService {
 
     // -------------------- DB: Article --------------------
 
-    private UUID upsertArticle(String articleName, String s3Key, String xmlContent, FileInsertStats stats) {
-        UpsertResult result = mmlDao.upsertArticle(articleName, s3Key, xmlContent);
+    private UUID upsertArticle(
+            String articleName,
+            String s3Key,
+            String xmlContent,
+            String versionTag,
+            FileInsertStats stats
+    ) {
+        UpsertResult result = mmlDao.upsertArticle(articleName, s3Key, xmlContent, versionTag);
         if (result.inserted()) {
             stats.add(FileInsertStats.ARTICLE, 1);
         }
@@ -916,6 +946,7 @@ public class EsxMmlMapperService {
             String itemKind,
             UUID articleId,
             String articleName,
+            String versionTag,
             UUID statementItemId,
             Map<String, UUID> libIdToItem,
             List<PendingRelation> pendingRelations,
@@ -934,7 +965,18 @@ public class EsxMmlMapperService {
         for (Element definitionEl : concreteDefinitions) {
             List<Element> patternElements = findNotationPatternElements(definitionEl);
             for (Element patternEl : patternElements) {
-                processNotationPattern(patternEl, articleId, articleName, null, libIdToItem, pendingRelations, symbolCache, formatCache, insertStats);
+                processNotationPattern(
+                        patternEl,
+                        articleId,
+                        articleName,
+                        versionTag,
+                        null,
+                        libIdToItem,
+                        pendingRelations,
+                        symbolCache,
+                        formatCache,
+                        insertStats
+                );
             }
         }
     }
@@ -943,6 +985,7 @@ public class EsxMmlMapperService {
             Element itemEl,
             UUID articleId,
             String articleName,
+            String versionTag,
             Map<String, UUID> libIdToItem,
             List<PendingRelation> pendingRelations,
             Map<String, UUID> symbolCache,
@@ -958,7 +1001,14 @@ public class EsxMmlMapperService {
             String regKind = registrationKindFromElementName(registrationEl.getName());
             String regLibId = buildRegistrationLibId(articleName, regKind, registrationEl.attributeValue("xmlid"));
 
-            MappedMmlItem regItem = buildSpecializedItem(registrationEl, "registration", regKind, regLibId, articleName);
+            MappedMmlItem regItem = buildSpecializedItem(
+                    registrationEl,
+                    "registration",
+                    regKind,
+                    regLibId,
+                    articleName,
+                    versionTag
+            );
             UUID registrationItemId = upsertMmlItem(articleId, regItem, insertStats);
             insertRegistration(registrationItemId, normalizeRegistrationKind(regKind), insertStats);
             if (regItem.libId != null && !regItem.libId.isBlank()) {
@@ -1019,11 +1069,19 @@ public class EsxMmlMapperService {
         return out;
     }
 
-    private MappedMmlItem buildSpecializedItem(Element sourceEl, String kind, String subKind, String libId, String articleName) {
+    private MappedMmlItem buildSpecializedItem(
+            Element sourceEl,
+            String kind,
+            String subKind,
+            String libId,
+            String articleName,
+            String versionTag
+    ) {
         MappedMmlItem it = new MappedMmlItem();
         it.kind = kind;
         it.subKind = subKind;
         it.libId = libId;
+        it.versionTag = versionTag;
         it.shortName = sourceEl.attributeValue("idnr");
         it.title = firstNonBlank(sourceEl.attributeValue("spelling"), sourceEl.attributeValue("idnr"), sourceEl.getName());
         it.textContent = extractTextContent(sourceEl);
@@ -1071,6 +1129,7 @@ public class EsxMmlMapperService {
             Element patternEl,
             UUID articleId,
             String articleName,
+            String versionTag,
             String fallbackConstructorLibId,
             Map<String, UUID> libIdToItem,
             List<PendingRelation> pendingRelations,
@@ -1083,7 +1142,14 @@ public class EsxMmlMapperService {
 
         String notationKind = notationKindFromPatternName(patternEl.getName());
         String notationLibId = buildNotationLibId(patternLibId, patternEl.getName(), patternEl.attributeValue("xmlid"));
-        MappedMmlItem notationItem = buildSpecializedItem(patternEl, "notation", notationKind, notationLibId, articleName);
+        MappedMmlItem notationItem = buildSpecializedItem(
+                patternEl,
+                "notation",
+                notationKind,
+                notationLibId,
+                articleName,
+                versionTag
+        );
 
         UUID notationItemId = upsertMmlItem(articleId, notationItem, insertStats);
         insertNotation(notationItemId, articleId, normalizeNotationKind(notationKind, patternEl), insertStats);
@@ -1216,9 +1282,10 @@ public class EsxMmlMapperService {
 
     // -------------------- Extraction --------------------
 
-    private MappedMmlItem extractItem(Element itemEl, String articleName, int itemSequence) {
+    private MappedMmlItem extractItem(Element itemEl, String articleName, String versionTag, int itemSequence) {
         MappedMmlItem it = new MappedMmlItem();
         it.kind = guessItemKind(itemEl);
+        it.versionTag = versionTag;
 
         if ("notation".equals(it.kind)) {
             it.subKind = guessNotationKind(itemEl);
@@ -1848,6 +1915,28 @@ public class EsxMmlMapperService {
         String file = s3Key.substring(Math.max(s3Key.lastIndexOf('/') + 1, 0));
         String base = file.replaceAll("\\.esx$", "");
         return base.toUpperCase(Locale.ROOT);
+    }
+
+    private static String deriveVersionTagFromS3Key(String s3Key) {
+        if (s3Key == null || s3Key.isBlank()) {
+            return "legacy";
+        }
+        String normalized = s3Key.replace('\\', '/');
+        String marker = "releases/";
+        int start = normalized.indexOf(marker);
+        if (start < 0) {
+            return "legacy";
+        }
+        int tagStart = start + marker.length();
+        if (tagStart >= normalized.length()) {
+            return "legacy";
+        }
+        int tagEnd = normalized.indexOf('/', tagStart);
+        String extracted = (tagEnd < 0) ? normalized.substring(tagStart) : normalized.substring(tagStart, tagEnd);
+        if (extracted == null || extracted.isBlank()) {
+            return "legacy";
+        }
+        return extracted.trim();
     }
 
 }
