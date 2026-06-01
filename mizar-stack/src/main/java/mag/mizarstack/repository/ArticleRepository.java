@@ -8,4 +8,6 @@ import java.util.UUID;
 
 public interface ArticleRepository extends JpaRepository<Article, UUID> {
     Optional<Article> findByName(String name);
+
+    Optional<Article> findByNameAndVersionTag(String name, String versionTag);
 }

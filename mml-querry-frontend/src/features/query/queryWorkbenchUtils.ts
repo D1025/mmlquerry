@@ -20,14 +20,13 @@ export interface SuggestionPosition {
 }
 
 const DEFAULT_TABLE_COLUMNS: ColumnDef[] = [
-  { key: 'lib_id', label: 'lib_id' },
+  { key: 'MMLId', label: 'MMLId' },
   { key: 'article_name', label: 'article_name' },
   { key: 'node_type', label: 'node_type' },
   { key: 'text_position', label: 'position' },
-  { key: 'raw', label: 'raw' },
 ]
 
-const HIDDEN_ROW_KEYS = new Set(['item_id', 'node_id', 'node_path'])
+const HIDDEN_ROW_KEYS = new Set(['item_id', 'node_id', 'node_path', 'mml_ids', 'lib_id', 'raw'])
 const SYMBOL_PRIORITY_COLUMNS = ['spelling', 'occurrences']
 const WORD_CHAR_REGEX = /[A-Za-z0-9_-]/
 
@@ -58,6 +57,7 @@ export function normalizeSortDirectionValue(raw: string | undefined): SortDirect
 export function buildRequestCacheBaseKey(request: ExecuteQueryRequest): string {
   return JSON.stringify({
     query: normalizeRequestString(request.query),
+    version: normalizeRequestString(request.version),
     size: request.size ?? 10,
     sortBy: normalizeRequestString(request.sortBy).toLowerCase(),
     sortDirection: normalizeSortDirectionValue(request.sortDirection),
@@ -75,6 +75,8 @@ export function buildCanonicalRequestFromResponse(
 ): ExecuteQueryRequest {
   return {
     query: normalizeRequestString(response.query || request.query),
+    version:
+      normalizeRequestString((response.version as string | undefined) ?? request.version) || undefined,
     page: response.page ?? request.page ?? 0,
     size: response.size ?? request.size ?? 10,
     sortBy: normalizeRequestString((response.sortBy as string | undefined) ?? request.sortBy) || undefined,

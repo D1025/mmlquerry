@@ -1,19 +1,26 @@
 package mag.mizarstack.query.eval;
 
 import lombok.RequiredArgsConstructor;
+import org.dom4j.Attribute;
 import org.dom4j.Document;
 import org.dom4j.DocumentHelper;
+import org.dom4j.Element;
 import org.dom4j.Node;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @Service
 @RequiredArgsConstructor
 public class QueryResultProjectionService {
 
     private static final int MAX_SQL_IN_IDS = 30000;
+    private static final Pattern MML_ID_ATTRIBUTE_REGEX = Pattern.compile(
+            "(?i)(?:^|\\s)MMLId\\s*=\\s*\"([^\"]+)\""
+    );
 
     private final JdbcClient jdbcClient;
 
@@ -39,6 +46,14 @@ public class QueryResultProjectionService {
 
             UUID itemId = asUuid(row.get("item_id"));
             String rawText = resolveRawText(row, itemId, rootContextByItemId, rawXmlByItemId, documentByItemId);
+            String resolvedMmlIds = resolveMmlIds(
+                    row,
+                    itemId,
+                    rawText,
+                    rootContextByItemId,
+                    rawXmlByItemId,
+                    documentByItemId
+            );
 
             Map<String, Object> item = new LinkedHashMap<>();
             item.put("item_id", itemId == null ? "" : itemId.toString());
@@ -48,6 +63,8 @@ public class QueryResultProjectionService {
             item.put("article_name", safeToString(row.get("article_name")));
             item.put("node_type", safeToString(row.get("node_type")));
             item.put("text_position", resolveTextPosition(row, itemId, rootContextByItemId));
+            item.put("MMLId", resolvedMmlIds);
+            item.put("mml_ids", resolvedMmlIds);
             if (row.containsKey("spelling")) {
                 item.put("spelling", safeToString(row.get("spelling")));
             }
@@ -284,6 +301,151 @@ public class QueryResultProjectionService {
             }
         }
         return safeToString(row.get("text_position"));
+    }
+
+    private String resolveMmlIds(
+            Map<String, Object> row,
+            UUID itemId,
+            String rawText,
+            Map<UUID, RootNodeContext> contextByItemId,
+            Map<UUID, String> rawXmlByItemId,
+            Map<UUID, Optional<Document>> documentByItemId
+    ) {
+        LinkedHashSet<String> fragmentMmlIds = extractMmlIdsFromXml(rawText);
+        if (!fragmentMmlIds.isEmpty()) {
+            return String.join(", ", fragmentMmlIds);
+        }
+
+        if (isNodeRow(row)) {
+            LinkedHashSet<String> nearestMmlIds = resolveNearestAncestorMmlIds(
+                    row,
+                    itemId,
+                    rawXmlByItemId,
+                    documentByItemId
+            );
+            if (!nearestMmlIds.isEmpty()) {
+                return String.join(", ", nearestMmlIds);
+            }
+        }
+
+        if (itemId != null) {
+            RootNodeContext rootNodeContext = contextByItemId.get(itemId);
+            if (rootNodeContext != null) {
+                LinkedHashSet<String> rootMmlIds = extractMmlIdsFromXml(rootNodeContext.rawText());
+                if (!rootMmlIds.isEmpty()) {
+                    return String.join(", ", rootMmlIds);
+                }
+            }
+        }
+
+        String libIdFallback = safeToString(row.get("lib_id"));
+        return libIdFallback;
+    }
+
+    private LinkedHashSet<String> resolveNearestAncestorMmlIds(
+            Map<String, Object> row,
+            UUID itemId,
+            Map<UUID, String> rawXmlByItemId,
+            Map<UUID, Optional<Document>> documentByItemId
+    ) {
+        if (itemId == null || rawXmlByItemId == null || rawXmlByItemId.isEmpty()) {
+            return new LinkedHashSet<>();
+        }
+        String nodeXmlId = safeToString(row.get("node_xmlid"));
+        if (nodeXmlId.isBlank()) {
+            return new LinkedHashSet<>();
+        }
+
+        Optional<Document> document = documentByItemId.computeIfAbsent(
+                itemId,
+                id -> parseDocument(rawXmlByItemId.get(id))
+        );
+        if (document.isEmpty()) {
+            return new LinkedHashSet<>();
+        }
+
+        try {
+            Node node = document.get().selectSingleNode("//*[@xmlid='" + nodeXmlId.replace("'", "") + "']");
+            Element current = node instanceof Element element ? element : (node == null ? null : node.getParent());
+            while (current != null) {
+                LinkedHashSet<String> elementMmlIds = new LinkedHashSet<>();
+                collectMmlIdsFromElementAttributes(current, elementMmlIds);
+                if (!elementMmlIds.isEmpty()) {
+                    return elementMmlIds;
+                }
+                current = current.getParent();
+            }
+        } catch (Exception ignored) {
+            return new LinkedHashSet<>();
+        }
+        return new LinkedHashSet<>();
+    }
+
+    private LinkedHashSet<String> extractMmlIdsFromXml(String rawXml) {
+        LinkedHashSet<String> out = new LinkedHashSet<>();
+        if (rawXml == null || rawXml.isBlank()) {
+            return out;
+        }
+
+        Optional<Document> parsed = parseDocument(rawXml);
+        if (parsed.isPresent()) {
+            Element root = parsed.get().getRootElement();
+            if (root != null) {
+                collectMmlIdsFromElementTree(root, out);
+            }
+            if (!out.isEmpty()) {
+                return out;
+            }
+        }
+
+        Matcher matcher = MML_ID_ATTRIBUTE_REGEX.matcher(rawXml);
+        while (matcher.find()) {
+            String rawValue = matcher.group(1);
+            if (rawValue == null) {
+                continue;
+            }
+            String normalizedValue = rawValue.trim();
+            if (!normalizedValue.isBlank()) {
+                out.add(normalizedValue);
+            }
+        }
+        return out;
+    }
+
+    private void collectMmlIdsFromElementTree(Element element, LinkedHashSet<String> out) {
+        if (element == null || out == null) {
+            return;
+        }
+        collectMmlIdsFromElementAttributes(element, out);
+        for (Iterator<?> iterator = element.elementIterator(); iterator.hasNext(); ) {
+            Object child = iterator.next();
+            if (child instanceof Element childElement) {
+                collectMmlIdsFromElementTree(childElement, out);
+            }
+        }
+    }
+
+    private void collectMmlIdsFromElementAttributes(Element element, LinkedHashSet<String> out) {
+        if (element == null || out == null) {
+            return;
+        }
+        for (Object rawAttribute : element.attributes()) {
+            if (!(rawAttribute instanceof Attribute attribute)) {
+                continue;
+            }
+            String name = attribute.getName();
+            if (name == null || !name.equalsIgnoreCase("MMLId")) {
+                continue;
+            }
+            String value = attribute.getValue();
+            if (value == null) {
+                continue;
+            }
+            String normalizedValue = value.trim();
+            if (!normalizedValue.isBlank()) {
+                out.add(normalizedValue);
+            }
+        }
     }
 
     private String safeToString(Object value) {

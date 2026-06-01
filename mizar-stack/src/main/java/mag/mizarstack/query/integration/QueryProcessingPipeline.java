@@ -23,9 +23,13 @@ public class QueryProcessingPipeline {
     }
 
     public QueryEvaluationService.QueryResult executeQuery(QueryNode query) {
+        return executeQuery(query, QueryVersionService.ALL_VERSIONS);
+    }
+
+    public QueryEvaluationService.QueryResult executeQuery(QueryNode query, String version) {
         long startTime = System.currentTimeMillis();
         try {
-            QueryEvaluationService.QueryResult result = evaluationService.evaluate(query);
+            QueryEvaluationService.QueryResult result = evaluationService.evaluate(query, version);
             long duration = System.currentTimeMillis() - startTime;
             log.info("Query executed successfully in {} ms", duration);
             return result;
@@ -41,7 +45,8 @@ public class QueryProcessingPipeline {
             int size,
             String sortBy,
             String sortDirection,
-            String filter
+            String filter,
+            String version
     ) {
         long startTime = System.currentTimeMillis();
         try {
@@ -51,7 +56,8 @@ public class QueryProcessingPipeline {
                     size,
                     sortBy,
                     sortDirection,
-                    filter
+                    filter,
+                    version
             );
             long duration = System.currentTimeMillis() - startTime;
             log.info("Paged list query executed successfully in {} ms", duration);

@@ -14,6 +14,8 @@ public interface MmlItemRepository extends JpaRepository<MmlItem, UUID> {
 
     List<MmlItem> findAllByLibIdOrderByIdAsc(String libId);
 
+    List<MmlItem> findAllByVersionTagAndLibIdOrderByIdAsc(String versionTag, String libId);
+
     @Query(value = """
             select id
             from mml_item

@@ -103,7 +103,8 @@ export const EXAMPLE_QUERY_LIBRARY: ExampleQueryDefinition[] = [
   {
     id: 'thesis-in-theorem',
     title: 'Tezy w twierdzeniach',
-    description: 'Wyszukuje twierdzenia, których propozycja zawiera nod Thesis.',
+    description:
+      'Wyszukuje twierdzenia, których propozycja zawiera nod Thesis. Działa dla bazy zbudowanej z esx_mml (nie esx_abstr).',
     query: 'list of theorem where proposition has Thesis',
   },
   {

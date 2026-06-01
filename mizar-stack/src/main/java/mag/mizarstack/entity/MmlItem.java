@@ -40,6 +40,9 @@ public class MmlItem {
     @Column(name = "lib_id")
     private String libId; // e.g., XBOOLE_0:func 1
 
+    @Column(name = "version_tag", nullable = false)
+    private String versionTag;
+
     private String title;
 
     @Column(name = "text_content")

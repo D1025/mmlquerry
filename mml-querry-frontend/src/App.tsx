@@ -12,9 +12,11 @@ import { useAppDispatch, useAppSelector } from './app/hooks'
 import {
   executeQuery,
   fetchItemFragment,
+  getQueryVersions,
   type ExecuteQueryRequest,
   type ExecuteQueryResponse,
   type QueryItem,
+  type QueryVersionOption,
 } from './features/query/queryApi'
 import {
   applySuggestionAtCursor,
@@ -54,6 +56,7 @@ import { AdminPanelView } from './features/admin/ui/AdminPanelView'
 const SUGGESTION_LIST_ID = 'query-suggestion-list'
 const SUGGESTION_OPTION_ID_PREFIX = 'query-suggestion-option'
 const SYNTAX_PANEL_COLLAPSED_STORAGE_KEY = 'mizar.query.syntaxPanelCollapsed'
+const QUERY_VERSION_STORAGE_KEY = 'mizar.query.selectedVersion'
 
 const QUERY_PLACEHOLDER =
   "Np. list of definition | nodes Item where redefine true and has *[spelling='Noetherian']"
@@ -65,7 +68,7 @@ function App() {
     resolvePageFromPath(window.location.hash.replace(/^#\/?/, '')),
   )
   const [filterText, setFilterText] = useState('')
-  const [sortColumn, setSortColumn] = useState<string>('lib_id')
+  const [sortColumn, setSortColumn] = useState<string>('article_name')
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc')
   const [page, setPage] = useState(0)
   const [rowsPerPage, setRowsPerPage] = useState(10)
@@ -94,6 +97,19 @@ function App() {
       return true
     }
   })
+  const [queryVersions, setQueryVersions] = useState<QueryVersionOption[]>([])
+  const [queryVersionsStatus, setQueryVersionsStatus] = useState<'idle' | 'loading' | 'succeeded' | 'failed'>('idle')
+  const [queryVersionsError, setQueryVersionsError] = useState<string | null>(null)
+  const [selectedVersion, setSelectedVersion] = useState<string>(() => {
+    if (typeof window === 'undefined') {
+      return ''
+    }
+    try {
+      return window.localStorage.getItem(QUERY_VERSION_STORAGE_KEY)?.trim() ?? ''
+    } catch {
+      return ''
+    }
+  })
 
   const queryInputRef = useRef<HTMLTextAreaElement | HTMLInputElement | null>(null)
   const cachedPageResponsesRef = useRef<Record<string, Record<number, ExecuteQueryResponse>>>({})
@@ -117,6 +133,44 @@ function App() {
   }, [dispatch, syntaxStatus])
 
   useEffect(() => {
+    let cancelled = false
+    setQueryVersionsStatus('loading')
+    setQueryVersionsError(null)
+
+    void getQueryVersions()
+      .then((response) => {
+        if (cancelled) {
+          return
+        }
+
+        const versions = response.versions ?? []
+        setQueryVersions(versions)
+        setQueryVersionsStatus('succeeded')
+
+        const persisted = selectedVersion.trim()
+        const hasPersisted = persisted.length > 0 && versions.some((option) => option.version === persisted)
+        if (hasPersisted) {
+          setSelectedVersion(persisted)
+          return
+        }
+
+        const fallback = response.defaultVersion?.trim() || versions[0]?.version || ''
+        setSelectedVersion(fallback)
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return
+        }
+        setQueryVersionsStatus('failed')
+        setQueryVersionsError(error instanceof Error ? error.message : 'Nie udało się pobrać wersji danych.')
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
     const onHashChange = () => {
       setPageRoute(resolvePageFromPath(window.location.hash.replace(/^#\/?/, '')))
     }
@@ -136,6 +190,17 @@ function App() {
       // Ignore localStorage errors (e.g. private mode restrictions).
     }
   }, [isSyntaxPanelCollapsed])
+
+  useEffect(() => {
+    if (!selectedVersion.trim()) {
+      return
+    }
+    try {
+      window.localStorage.setItem(QUERY_VERSION_STORAGE_KEY, selectedVersion.trim())
+    } catch {
+      // Ignore localStorage errors.
+    }
+  }, [selectedVersion])
 
   const tableColumns = useMemo<ColumnDef[]>(
     () => deriveTableColumns(result?.items ?? []),
@@ -195,18 +260,19 @@ function App() {
 
   useEffect(() => {
     const appName = 'Mizar Query Workbench'
+    const versionSuffix = selectedVersion.trim() ? ` | Wersja ${selectedVersion.trim()}` : ''
 
     if (pageRoute === 'examples') {
-      document.title = `Przykłady | ${appName}`
+      document.title = `Przykłady${versionSuffix} | ${appName}`
       return
     }
     if (pageRoute === 'admin') {
-      document.title = `Admin | ${appName}`
+      document.title = `Admin${versionSuffix} | ${appName}`
       return
     }
 
     if (executeStatus === 'loading') {
-      document.title = `Wyszukiwanie... | ${appName}`
+      document.title = `Wyszukiwanie...${versionSuffix} | ${appName}`
       return
     }
 
@@ -214,12 +280,12 @@ function App() {
       const pageSize = result.size ?? rowsPerPage
       const totalPages = pageSize > 0 ? Math.max(1, Math.ceil(result.count / pageSize)) : 1
       const currentPage = Math.min(totalPages, Math.max(1, (result.page ?? page) + 1))
-      document.title = `Wyniki: ${result.count} | Strona ${currentPage}/${totalPages} | ${appName}`
+      document.title = `Wyniki: ${result.count} | Strona ${currentPage}/${totalPages}${versionSuffix} | ${appName}`
       return
     }
 
-    document.title = `Edytor zapytań | ${appName}`
-  }, [executeStatus, page, pageRoute, result?.count, result?.page, result?.size, rowsPerPage])
+    document.title = `Edytor zapytań${versionSuffix} | ${appName}`
+  }, [executeStatus, page, pageRoute, result?.count, result?.page, result?.size, rowsPerPage, selectedVersion])
 
   const updateSuggestionPosition = useCallback(() => {
     const input = queryInputRef.current
@@ -399,6 +465,7 @@ function App() {
 
       return {
         query: normalizedQuery,
+        version: selectedVersion.trim() || undefined,
         page: overrides?.page ?? page,
         size: overrides?.size ?? fallbackSize ?? rowsPerPage,
         sortBy: overrides?.sortBy ?? fallbackSortBy ?? sortColumn,
@@ -418,6 +485,7 @@ function App() {
       rowsPerPage,
       sortColumn,
       sortDirection,
+      selectedVersion,
     ],
   )
 
@@ -577,6 +645,20 @@ function App() {
     dispatchPagedQueryRef.current = dispatchPagedQuery
   }, [dispatchPagedQuery])
 
+  useEffect(() => {
+    cachedPageResponsesRef.current = {}
+    prefetchInFlightRef.current.clear()
+
+    const activeQuery = result?.query
+    if (!activeQuery || executeStatus === 'loading') {
+      return
+    }
+
+    setPage(0)
+    resetExpandedState()
+    dispatchPagedQueryRef.current(activeQuery, { page: 0 })
+  }, [selectedVersion])
+
   const handleCancelQuery = useCallback(() => {
     activeQueryRequestRef.current?.abort()
     activeQueryRequestRef.current = null
@@ -683,7 +765,15 @@ function App() {
 
   return (
     <Stack sx={{ minHeight: '100vh' }}>
-      <WorkbenchHeader pageRoute={pageRoute} onNavigate={navigateToPage} />
+      <WorkbenchHeader
+        pageRoute={pageRoute}
+        onNavigate={navigateToPage}
+        versionOptions={queryVersions}
+        selectedVersion={selectedVersion}
+        versionStatus={queryVersionsStatus}
+        versionError={queryVersionsError}
+        onVersionChange={setSelectedVersion}
+      />
 
       <Container
         maxWidth={false}

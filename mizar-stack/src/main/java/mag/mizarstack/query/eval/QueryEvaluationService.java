@@ -6,12 +6,14 @@ import lombok.NoArgsConstructor;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import mag.mizarstack.query.ast.*;
+import mag.mizarstack.query.integration.QueryVersionService;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
 
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
@@ -41,6 +43,8 @@ public class QueryEvaluationService {
     private static final String ATTRIBUTE_TAG = "attribute";
     private static final String ATTRIBUTE_KEY_NONOCC = "nonocc";
     private static final String ATTRIBUTE_KEY_SPELLING = "spelling";
+    private static final String ALL_VERSIONS = QueryVersionService.ALL_VERSIONS;
+    private static final String LEGACY_VERSION = QueryVersionService.LEGACY_VERSION;
 
     private static final Map<String, List<String>> ATTRIBUTE_KEY_CANDIDATES = Map.ofEntries(
             Map.entry("absoluteconstrmmlid", List.of("absoluteconstrMMLId", "absoluteconstrmmlid")),
@@ -65,8 +69,17 @@ public class QueryEvaluationService {
 
     private final JdbcClient jdbcClient;
     private final ExtendedQueryEvaluationService extendedEvaluationService;
+    private final ThreadLocal<String> activeVersionFilter = ThreadLocal.withInitial(() -> ALL_VERSIONS);
 
     public QueryResult evaluate(QueryNode query) {
+        return evaluate(query, ALL_VERSIONS);
+    }
+
+    public QueryResult evaluate(QueryNode query, String version) {
+        return withActiveVersion(version, () -> evaluateInternal(query));
+    }
+
+    private QueryResult evaluateInternal(QueryNode query) {
         log.info("Evaluating query: {}", query.getClass().getSimpleName());
         if (query instanceof ListQueryNode node) {
             return visitListQuery(node);
@@ -96,6 +109,29 @@ public class QueryEvaluationService {
     }
 
     public PagedListQueryResult evaluatePagedListQuery(
+            ListQueryNode node,
+            int page,
+            int size,
+            String sortBy,
+            String sortDirection,
+            String filter
+    ) {
+        return evaluatePagedListQuery(node, page, size, sortBy, sortDirection, filter, ALL_VERSIONS);
+    }
+
+    public PagedListQueryResult evaluatePagedListQuery(
+            ListQueryNode node,
+            int page,
+            int size,
+            String sortBy,
+            String sortDirection,
+            String filter,
+            String version
+    ) {
+        return withActiveVersion(version, () -> evaluatePagedListQueryInternal(node, page, size, sortBy, sortDirection, filter));
+    }
+
+    private PagedListQueryResult evaluatePagedListQueryInternal(
             ListQueryNode node,
             int page,
             int size,
@@ -171,14 +207,20 @@ public class QueryEvaluationService {
 
     private QueryResult visitListQuery(ListQueryNode node) {
         String source = normalizeSource(node.getSource());
+        String version = currentVersionFilter();
         if (node.getListType() == ListType.SYMBOLS) {
             Map<String, Object> params = new LinkedHashMap<>();
             params.put("source", source);
+            params.put("version", version);
+            params.put("legacyVersion", LEGACY_VERSION);
             String sql = buildSymbolNodesBaseSql(params, node.getSymbolSpellingFilter())
                     + "\norder by a.name asc, mi.lib_id asc, n.item_id asc, n.pos asc, n.id asc";
             return new QueryResult(queryRows(sql, params), "List query: " + node.getListType());
         }
         if (node.getListType() == ListType.SYMBOL_OCCURRENCES) {
+            Map<String, Object> params = new LinkedHashMap<>();
+            params.put("source", source);
+            params.put("version", version);
             String sql = """
                     select trim(coalesce(n.details -> 'attrs' ->> 'spelling', '')) as spelling,
                            count(*) as occurrences
@@ -186,50 +228,64 @@ public class QueryEvaluationService {
                     join mml_item mi on mi.id = n.item_id
                     join article a on a.id = mi.article_id
                     where (:source = '*' or a.name = :source)
+                      and (:version = '*' or coalesce(mi.version_tag, :legacyVersion) = :version)
                       and right(lower(coalesce(n.details ->> 'tag', '')), 8) = '-pattern'
                       and nullif(trim(coalesce(n.details -> 'attrs' ->> 'spelling', '')), '') is not null
                     group by trim(coalesce(n.details -> 'attrs' ->> 'spelling', ''))
                     order by occurrences desc, spelling asc
                     """;
-            return new QueryResult(queryGenericRows(sql, Map.of("source", source)), "List query: " + node.getListType());
+            params.put("legacyVersion", LEGACY_VERSION);
+            return new QueryResult(queryGenericRows(sql, params), "List query: " + node.getListType());
         }
 
         String sql = switch (node.getListType()) {
             case THEOREMS -> """
                     select vt.item_id, vt.lib_id, vt.article_name, vt.kind,
+                           coalesce(mi.version_tag, :legacyVersion) as article_version,
                            vt.subkind, vt.text_content, vt.node_type,
                            coalesce(rn.details -> 'attrs' ->> 'position', cast(rn.pos as text)) as text_position
                     from view_theorems vt
+                    join mml_item mi on mi.id = vt.item_id
                     left join view_item_root_nodes rn on rn.item_id = vt.item_id
-                    where :source = '*'
-                       or vt.article_name = :source
+                    where (:source = '*'
+                       or vt.article_name = :source)
+                      and (:version = '*' or coalesce(mi.version_tag, :legacyVersion) = :version)
                     """;
             case DEFINITIONS -> """
                     select vd.item_id, vd.lib_id, vd.article_name, vd.kind,
+                           coalesce(mi.version_tag, :legacyVersion) as article_version,
                            vd.subkind, vd.text_content, vd.node_type,
                            coalesce(rn.details -> 'attrs' ->> 'position', cast(rn.pos as text)) as text_position
                     from view_definitions vd
+                    join mml_item mi on mi.id = vd.item_id
                     left join view_item_root_nodes rn on rn.item_id = vd.item_id
-                    where :source = '*'
-                       or vd.article_name = :source
+                    where (:source = '*'
+                       or vd.article_name = :source)
+                      and (:version = '*' or coalesce(mi.version_tag, :legacyVersion) = :version)
                     """;
             case STATEMENTS -> """
                     select vs.item_id, vs.lib_id, vs.article_name, vs.kind,
+                           coalesce(mi.version_tag, :legacyVersion) as article_version,
                            vs.subkind, vs.text_content, vs.node_type,
                            coalesce(rn.details -> 'attrs' ->> 'position', cast(rn.pos as text)) as text_position
                     from view_statements vs
+                    join mml_item mi on mi.id = vs.item_id
                     left join view_item_root_nodes rn on rn.item_id = vs.item_id
-                    where :source = '*'
-                       or vs.article_name = :source
+                    where (:source = '*'
+                       or vs.article_name = :source)
+                      and (:version = '*' or coalesce(mi.version_tag, :legacyVersion) = :version)
                     """;
             case REGISTRATIONS -> """
                     select vr.item_id, vr.lib_id, vr.article_name, vr.kind,
+                           coalesce(mi.version_tag, :legacyVersion) as article_version,
                            vr.subkind, vr.text_content, vr.node_type,
                            coalesce(rn.details -> 'attrs' ->> 'position', cast(rn.pos as text)) as text_position
                     from view_registrations vr
+                    join mml_item mi on mi.id = vr.item_id
                     left join view_item_root_nodes rn on rn.item_id = vr.item_id
-                    where :source = '*'
-                       or vr.article_name = :source
+                    where (:source = '*'
+                       or vr.article_name = :source)
+                      and (:version = '*' or coalesce(mi.version_tag, :legacyVersion) = :version)
                     """;
             case SYMBOLS -> throw new IllegalStateException("Unexpected symbol list dispatch.");
             case SYMBOL_OCCURRENCES -> throw new IllegalStateException("Unexpected symbol-occurrence list dispatch.");
@@ -237,6 +293,7 @@ public class QueryEvaluationService {
                     select vi.id as item_id,
                            vi.lib_id,
                            vi.article_name,
+                           vi.article_version,
                            vi.kind,
                            vi.subkind,
                            vi.text_content,
@@ -250,17 +307,24 @@ public class QueryEvaluationService {
                             end as node_type
                     from view_items vi
                     left join view_item_root_nodes rn on rn.item_id = vi.id
-                    where :source = '*'
-                       or vi.article_name = :source
+                    where (:source = '*'
+                       or vi.article_name = :source)
+                      and (:version = '*' or coalesce(vi.article_version, :legacyVersion) = :version)
                     """;
         };
-        return new QueryResult(queryRows(sql, Map.of("source", source)), "List query: " + node.getListType());
+        Map<String, Object> params = new LinkedHashMap<>();
+        params.put("source", source);
+        params.put("version", version);
+        params.put("legacyVersion", LEGACY_VERSION);
+        return new QueryResult(queryRows(sql, params), "List query: " + node.getListType());
     }
 
     private PagedListPlan buildPagedListPlan(ListQueryNode queryNode, String source) {
         ListType listType = queryNode.getListType();
         Map<String, Object> params = new LinkedHashMap<>();
         params.put("source", source);
+        params.put("version", currentVersionFilter());
+        params.put("legacyVersion", LEGACY_VERSION);
 
         if (listType == ListType.SYMBOLS) {
             String baseSql = buildSymbolNodesBaseSql(params, queryNode.getSymbolSpellingFilter());
@@ -274,6 +338,7 @@ public class QueryEvaluationService {
                     join mml_item mi on mi.id = n.item_id
                     join article a on a.id = mi.article_id
                     where (:source = '*' or a.name = :source)
+                      and (:version = '*' or coalesce(mi.version_tag, :legacyVersion) = :version)
                       and right(lower(coalesce(n.details ->> 'tag', '')), 8) = '-pattern'
                       and nullif(trim(coalesce(n.details -> 'attrs' ->> 'spelling', '')), '') is not null
                     group by trim(coalesce(n.details -> 'attrs' ->> 'spelling', ''))
@@ -284,44 +349,57 @@ public class QueryEvaluationService {
         String baseSql = switch (listType) {
             case THEOREMS -> """
                     select vt.item_id, vt.lib_id, vt.article_name, vt.kind,
+                           coalesce(mi.version_tag, :legacyVersion) as article_version,
                            vt.subkind, vt.text_content, vt.node_type,
                            coalesce(rn.details -> 'attrs' ->> 'position', cast(rn.pos as text)) as text_position
                     from view_theorems vt
+                    join mml_item mi on mi.id = vt.item_id
                     left join view_item_root_nodes rn on rn.item_id = vt.item_id
-                    where :source = '*'
-                       or vt.article_name = :source
+                    where (:source = '*'
+                       or vt.article_name = :source)
+                      and (:version = '*' or coalesce(mi.version_tag, :legacyVersion) = :version)
                     """;
             case DEFINITIONS -> """
                     select vd.item_id, vd.lib_id, vd.article_name, vd.kind,
+                           coalesce(mi.version_tag, :legacyVersion) as article_version,
                            vd.subkind, vd.text_content, vd.node_type,
                            coalesce(rn.details -> 'attrs' ->> 'position', cast(rn.pos as text)) as text_position
                     from view_definitions vd
+                    join mml_item mi on mi.id = vd.item_id
                     left join view_item_root_nodes rn on rn.item_id = vd.item_id
-                    where :source = '*'
-                       or vd.article_name = :source
+                    where (:source = '*'
+                       or vd.article_name = :source)
+                      and (:version = '*' or coalesce(mi.version_tag, :legacyVersion) = :version)
                     """;
             case STATEMENTS -> """
                     select vs.item_id, vs.lib_id, vs.article_name, vs.kind,
+                           coalesce(mi.version_tag, :legacyVersion) as article_version,
                            vs.subkind, vs.text_content, vs.node_type,
                            coalesce(rn.details -> 'attrs' ->> 'position', cast(rn.pos as text)) as text_position
                     from view_statements vs
+                    join mml_item mi on mi.id = vs.item_id
                     left join view_item_root_nodes rn on rn.item_id = vs.item_id
-                    where :source = '*'
-                       or vs.article_name = :source
+                    where (:source = '*'
+                       or vs.article_name = :source)
+                      and (:version = '*' or coalesce(mi.version_tag, :legacyVersion) = :version)
                     """;
             case REGISTRATIONS -> """
                     select vr.item_id, vr.lib_id, vr.article_name, vr.kind,
+                           coalesce(mi.version_tag, :legacyVersion) as article_version,
                            vr.subkind, vr.text_content, vr.node_type,
                            coalesce(rn.details -> 'attrs' ->> 'position', cast(rn.pos as text)) as text_position
                     from view_registrations vr
+                    join mml_item mi on mi.id = vr.item_id
                     left join view_item_root_nodes rn on rn.item_id = vr.item_id
-                    where :source = '*'
-                       or vr.article_name = :source
+                    where (:source = '*'
+                       or vr.article_name = :source)
+                      and (:version = '*' or coalesce(mi.version_tag, :legacyVersion) = :version)
                     """;
             case ALL -> """
                     select vi.id as item_id,
                            vi.lib_id,
                            vi.article_name,
+                           vi.article_version,
                            vi.kind,
                            vi.subkind,
                            vi.text_content,
@@ -335,8 +413,9 @@ public class QueryEvaluationService {
                             end as node_type
                     from view_items vi
                     left join view_item_root_nodes rn on rn.item_id = vi.id
-                    where :source = '*'
-                       or vi.article_name = :source
+                    where (:source = '*'
+                       or vi.article_name = :source)
+                      and (:version = '*' or coalesce(vi.article_version, :legacyVersion) = :version)
                     """;
             case SYMBOLS, SYMBOL_OCCURRENCES -> throw new IllegalStateException(
                     "Unexpected symbol list dispatch in entity plan."
@@ -350,6 +429,7 @@ public class QueryEvaluationService {
                 select n.item_id,
                        mi.lib_id,
                        a.name as article_name,
+                       coalesce(mi.version_tag, :legacyVersion) as article_version,
                        mi.kind,
                        mi.subkind,
                        mi.text_content,
@@ -364,6 +444,7 @@ public class QueryEvaluationService {
                 join mml_item mi on mi.id = n.item_id
                 join article a on a.id = mi.article_id
                 where (:source = '*' or a.name = :source)
+                  and (:version = '*' or coalesce(mi.version_tag, :legacyVersion) = :version)
                   and right(lower(coalesce(n.details ->> 'tag', '')), 8) = '-pattern'
                   and nullif(trim(coalesce(n.details -> 'attrs' ->> 'spelling', '')), '') is not null
                 """);
@@ -540,12 +621,17 @@ public class QueryEvaluationService {
                        end as node_type
                 from view_items vi
                 where vi.article_name = :articleName
+                  and (:version = '*' or coalesce(vi.article_version, :legacyVersion) = :version)
                 """;
-        return new QueryResult(queryRows(sql, Map.of("articleName", node.getArticleName())), "Article query");
+        Map<String, Object> params = new LinkedHashMap<>();
+        params.put("articleName", node.getArticleName());
+        params.put("version", currentVersionFilter());
+        params.put("legacyVersion", LEGACY_VERSION);
+        return new QueryResult(queryRows(sql, params), "Article query");
     }
 
     private QueryResult visitGroupQuery(GroupQueryNode node) {
-        QueryResult inner = evaluate(node.getInner());
+        QueryResult inner = evaluateInternal(node.getInner());
         if (node.getQuantifier() == GroupQuantifier.NONE) {
             return negate(inner);
         }
@@ -553,8 +639,8 @@ public class QueryEvaluationService {
     }
 
     private QueryResult visitCompoundQuery(CompoundQueryNode node) {
-        QueryResult left = evaluate(node.getLeft());
-        QueryResult right = evaluate(node.getRight());
+        QueryResult left = evaluateInternal(node.getLeft());
+        QueryResult right = evaluateInternal(node.getRight());
 
         List<Map<String, Object>> data = switch (node.getOperator()) {
             case AND -> intersect(left.getData(), right.getData());
@@ -566,7 +652,7 @@ public class QueryEvaluationService {
     }
 
     private QueryResult visitContextQuery(ContextQueryNode node) {
-        QueryResult base = evaluate(node.getQuery());
+        QueryResult base = evaluateInternal(node.getQuery());
         if (node.getContext() == null || node.getContext().getContextData() == null) {
             return base;
         }
@@ -574,12 +660,12 @@ public class QueryEvaluationService {
     }
 
     private QueryResult visitOperationQuery(OperationQueryNode node) {
-        QueryResult base = evaluate(node.getQuery());
+        QueryResult base = evaluateInternal(node.getQuery());
         return evaluateOperation(base, node.getOperation());
     }
 
     private QueryResult visitSelectiveQuery(SelectiveQueryNode node) {
-        QueryResult base = evaluate(node.getQuery());
+        QueryResult base = evaluateInternal(node.getQuery());
         return applyCriterion(base, node.getCriterion());
     }
 
@@ -901,6 +987,7 @@ public class QueryEvaluationService {
                        n0.item_id,
                        mi.lib_id,
                        a.name as article_name,
+                       coalesce(mi.version_tag, :legacyVersion) as article_version,
                        mi.kind,
                        coalesce(n0.details -> 'attrs' ->> 'kind', mi.subkind) as subkind,
                        n0.raw as raw_text,
@@ -939,6 +1026,7 @@ public class QueryEvaluationService {
 
         Map<String, Object> params = new LinkedHashMap<>();
         params.put("itemIdsCsv", toUuidCsv(itemIds));
+        params.put("legacyVersion", LEGACY_VERSION);
         putNodePredicateParams(params, target, 0);
         for (int i = 0; i < descendantPredicates.size(); i++) {
             putNodePredicateParams(params, descendantPredicates.get(i), i + 1);
@@ -1013,6 +1101,7 @@ public class QueryEvaluationService {
         String normalizedSpelling = normalizeLookupValue(spellingPredicate.getAttributeValue());
         Map<String, Object> params = new LinkedHashMap<>();
         params.put("itemIdsCsv", toUuidCsv(itemIds));
+        params.put("legacyVersion", LEGACY_VERSION);
 
         StringBuilder sql = new StringBuilder("""
                 with base_items as (
@@ -1023,6 +1112,7 @@ public class QueryEvaluationService {
                        n0.item_id,
                        mi.lib_id,
                        a.name as article_name,
+                       coalesce(mi.version_tag, :legacyVersion) as article_version,
                        mi.kind,
                        coalesce(n0.details -> 'attrs' ->> 'kind', mi.subkind) as subkind,
                        n0.raw as raw_text,
@@ -1378,8 +1468,15 @@ public class QueryEvaluationService {
                            else vi.kind
                        end as node_type
                 from view_items vi
+                where (:version = '*' or coalesce(vi.article_version, :legacyVersion) = :version)
                 """;
-        List<Map<String, Object>> universe = queryRows(sql, Map.of());
+        List<Map<String, Object>> universe = queryRows(
+                sql,
+                Map.of(
+                        "version", currentVersionFilter(),
+                        "legacyVersion", LEGACY_VERSION
+                )
+        );
         return new QueryResult(difference(universe, input.getData()), "Negated query");
     }
 
@@ -1417,9 +1514,14 @@ public class QueryEvaluationService {
 
     private String rowKey(Map<String, Object> row) {
         Object nodeXmlId = row.get("node_xmlid");
+        UUID itemId = asUuid(row.get("item_id"));
+        if (nodeXmlId != null && itemId != null) {
+            return "xmlid:" + itemId + ":" + nodeXmlId;
+        }
         Object articleName = row.get("article_name");
         if (nodeXmlId != null && articleName != null) {
-            return "xmlid:" + articleName + ":" + nodeXmlId;
+            String version = safeToString(row.get("article_version"));
+            return "xmlid:" + articleName + ":" + version + ":" + nodeXmlId;
         }
         Object nodeId = row.get("node_id");
         if (nodeId != null) {
@@ -1429,7 +1531,6 @@ public class QueryEvaluationService {
         if (!spelling.isBlank()) {
             return "spelling:" + normalizeLookupValue(spelling);
         }
-        UUID itemId = asUuid(row.get("item_id"));
         if (itemId != null) {
             return "item:" + itemId;
         }
@@ -2612,6 +2713,32 @@ public class QueryEvaluationService {
         return source.getSource().toUpperCase(Locale.ROOT);
     }
 
+    private <T> T withActiveVersion(String requestedVersion, Supplier<T> supplier) {
+        String previous = activeVersionFilter.get();
+        activeVersionFilter.set(normalizeVersionFilter(requestedVersion));
+        try {
+            return supplier.get();
+        } finally {
+            activeVersionFilter.set(previous == null ? ALL_VERSIONS : previous);
+        }
+    }
+
+    private String currentVersionFilter() {
+        String current = activeVersionFilter.get();
+        return normalizeVersionFilter(current);
+    }
+
+    private String normalizeVersionFilter(String rawVersion) {
+        if (rawVersion == null) {
+            return ALL_VERSIONS;
+        }
+        String trimmed = rawVersion.trim();
+        if (trimmed.isEmpty() || ALL_VERSIONS.equals(trimmed)) {
+            return ALL_VERSIONS;
+        }
+        return trimmed;
+    }
+
     private String toUuidCsv(List<UUID> ids) {
         StringJoiner joiner = new StringJoiner(",");
         for (UUID id : ids) {
@@ -2627,11 +2754,15 @@ public class QueryEvaluationService {
         for (Map.Entry<String, Object> entry : params.entrySet()) {
             spec = spec.param(entry.getKey(), entry.getValue());
         }
-        return spec.query((rs, rowNum) -> {
+        List<Map<String, Object>> rows = spec.query((rs, rowNum) -> {
             Map<String, Object> row = new LinkedHashMap<>();
             row.put("item_id", rs.getObject("item_id"));
             row.put("lib_id", safeGet(rs, "lib_id"));
             row.put("article_name", safeGet(rs, "article_name"));
+            Object articleVersion = safeGet(rs, "article_version");
+            if (articleVersion != null) {
+                row.put("article_version", articleVersion);
+            }
             row.put("kind", safeGet(rs, "kind"));
             row.put("subkind", safeGet(rs, "subkind"));
             Object rawText = safeGet(rs, "raw_text");
@@ -2668,6 +2799,7 @@ public class QueryEvaluationService {
             }
             return row;
         }).list();
+        return filterRowsByVersion(rows);
     }
 
     private List<Map<String, Object>> queryGenericRows(String sql, Map<String, Object> params) {
@@ -2675,7 +2807,7 @@ public class QueryEvaluationService {
         for (Map.Entry<String, Object> entry : params.entrySet()) {
             spec = spec.param(entry.getKey(), entry.getValue());
         }
-        return spec.query((rs, rowNum) -> {
+        List<Map<String, Object>> rows = spec.query((rs, rowNum) -> {
             java.sql.ResultSetMetaData metaData = rs.getMetaData();
             int columnCount = metaData.getColumnCount();
             Map<String, Object> row = new LinkedHashMap<>();
@@ -2688,6 +2820,7 @@ public class QueryEvaluationService {
             }
             return row;
         }).list();
+        return filterRowsByVersion(rows);
     }
 
     private int queryCount(String sql, Map<String, Object> params) {
@@ -2736,6 +2869,7 @@ public class QueryEvaluationService {
             spec = spec.param(entry.getKey(), entry.getValue());
         }
         List<UUID> rows = spec.query((rs, rowNum) -> asUuid(rs.getObject("item_id"))).list();
+        rows = filterItemIdsByVersion(rows);
         LinkedHashSet<UUID> unique = new LinkedHashSet<>();
         for (UUID row : rows) {
             if (row != null) {
@@ -2743,6 +2877,91 @@ public class QueryEvaluationService {
             }
         }
         return new ArrayList<>(unique);
+    }
+
+    private List<Map<String, Object>> filterRowsByVersion(List<Map<String, Object>> rows) {
+        if (rows == null || rows.isEmpty()) {
+            return rows == null ? List.of() : rows;
+        }
+        String version = currentVersionFilter();
+        if (ALL_VERSIONS.equals(version)) {
+            return rows;
+        }
+
+        boolean hasArticleVersionColumn = rows.stream()
+                .anyMatch(row -> row != null && row.containsKey("article_version"));
+        if (hasArticleVersionColumn) {
+            return rows.stream()
+                    .filter(row -> {
+                        String rowVersion = normalizeVersionFilter(safeToString(row.get("article_version")));
+                        if (ALL_VERSIONS.equals(rowVersion)) {
+                            rowVersion = LEGACY_VERSION;
+                        }
+                        return version.equals(rowVersion);
+                    })
+                    .toList();
+        }
+
+        List<UUID> itemIds = rows.stream()
+                .map(row -> asUuid(row.get("item_id")))
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
+        if (itemIds.isEmpty()) {
+            return rows;
+        }
+
+        Set<UUID> allowed = loadItemIdsForVersion(itemIds, version);
+        if (allowed.isEmpty()) {
+            return List.of();
+        }
+        return rows.stream()
+                .filter(row -> {
+                    UUID itemId = asUuid(row.get("item_id"));
+                    return itemId == null || allowed.contains(itemId);
+                })
+                .toList();
+    }
+
+    private List<UUID> filterItemIdsByVersion(List<UUID> itemIds) {
+        if (itemIds == null || itemIds.isEmpty()) {
+            return itemIds == null ? List.of() : itemIds;
+        }
+        String version = currentVersionFilter();
+        if (ALL_VERSIONS.equals(version)) {
+            return itemIds;
+        }
+        Set<UUID> allowed = loadItemIdsForVersion(itemIds, version);
+        if (allowed.isEmpty()) {
+            return List.of();
+        }
+        return itemIds.stream()
+                .filter(Objects::nonNull)
+                .filter(allowed::contains)
+                .toList();
+    }
+
+    private Set<UUID> loadItemIdsForVersion(List<UUID> itemIds, String version) {
+        if (itemIds == null || itemIds.isEmpty()) {
+            return Set.of();
+        }
+        JdbcClient.StatementSpec spec = jdbcClient.sql("""
+                select mi.id as item_id
+                from mml_item mi
+                where mi.id in (:itemIds)
+                  and coalesce(mi.version_tag, :legacyVersion) = :version
+                """);
+        spec = spec.param("itemIds", itemIds)
+                .param("legacyVersion", LEGACY_VERSION)
+                .param("version", version);
+        List<UUID> matched = spec.query((rs, rowNum) -> asUuid(rs.getObject("item_id"))).list();
+        LinkedHashSet<UUID> out = new LinkedHashSet<>();
+        for (UUID id : matched) {
+            if (id != null) {
+                out.add(id);
+            }
+        }
+        return out;
     }
 
     private Object safeGet(java.sql.ResultSet rs, String column) {

@@ -33,6 +33,9 @@ public class Article {
     @Column(name = "file_path")
     private String filePath;
 
+    @Column(name = "version_tag", nullable = false)
+    private String versionTag;
+
     @Column(name = "xml_content")
     private String xmlContent;
 

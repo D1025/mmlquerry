@@ -27,9 +27,10 @@ public class QueryExecutionService {
     private final QueryParser queryParser;
     private final QueryProcessingPipeline queryProcessingPipeline;
     private final QueryResultProjectionService queryResultProjectionService;
+    private final QueryVersionService queryVersionService;
 
     public QueryExecutionOutcome execute(String queryText, boolean includeItemsInResponse) {
-        return execute(queryText, includeItemsInResponse, new QueryPageRequest(null, null, null, null, null));
+        return execute(queryText, includeItemsInResponse, new QueryPageRequest(null, null, null, null, null, null));
     }
 
     public QueryExecutionOutcome execute(
@@ -44,6 +45,7 @@ public class QueryExecutionService {
         String normalizedSortBy = trimToNull(pageRequest == null ? null : pageRequest.sortBy());
         String normalizedSortDirection = normalizeSortDirection(pageRequest == null ? null : pageRequest.sortDirection());
         String normalizedFilter = trimToNull(pageRequest == null ? null : pageRequest.filter());
+        String resolvedVersion = queryVersionService.resolveVersionOrDefault(pageRequest == null ? null : pageRequest.version());
 
         long parseStart = System.currentTimeMillis();
         QueryNode ast = queryParser.parseQuery(queryText);
@@ -63,7 +65,8 @@ public class QueryExecutionService {
                             normalizedSize,
                             normalizedSortBy,
                             normalizedSortDirection,
-                            normalizedFilter
+                            normalizedFilter,
+                            resolvedVersion
                     );
             executeMs = System.currentTimeMillis() - executeStart;
 
@@ -86,7 +89,7 @@ public class QueryExecutionService {
             );
         } else {
             long executeStart = System.currentTimeMillis();
-            result = queryProcessingPipeline.executeQuery(ast);
+            result = queryProcessingPipeline.executeQuery(ast, resolvedVersion);
             executeMs = System.currentTimeMillis() - executeStart;
 
             long projectionStart = System.currentTimeMillis();
@@ -98,7 +101,8 @@ public class QueryExecutionService {
                             normalizedSize,
                             normalizedSortBy,
                             normalizedSortDirection,
-                            normalizedFilter
+                            normalizedFilter,
+                            resolvedVersion
                     )
             );
             projectionMs = System.currentTimeMillis() - projectionStart;
@@ -121,6 +125,7 @@ public class QueryExecutionService {
                 page.sortBy(),
                 page.sortDirection(),
                 page.filter(),
+                resolvedVersion,
                 metrics
         );
     }
@@ -288,6 +293,7 @@ public class QueryExecutionService {
             String sortBy,
             String sortDirection,
             String filter,
+            String version,
             QueryExecutionMetrics metrics
     ) {
     }
@@ -305,7 +311,8 @@ public class QueryExecutionService {
             Integer size,
             String sortBy,
             String sortDirection,
-            String filter
+            String filter,
+            String version
     ) {
     }
 

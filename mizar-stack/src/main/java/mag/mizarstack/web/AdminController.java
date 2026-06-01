@@ -203,7 +203,34 @@ public class AdminController {
                     .name(event.type())
                     .data(payload));
         } catch (IOException ex) {
-            throw new IllegalStateException("Unable to deliver admin stream event.", ex);
+            if (isClientDisconnected(ex)) {
+                log.debug("Admin stream client disconnected: {}", ex.getMessage());
+                emitter.complete();
+                return;
+            }
+            log.warn("Unable to deliver admin stream event.", ex);
+            emitter.completeWithError(ex);
         }
+    }
+
+    private static boolean isClientDisconnected(Throwable ex) {
+        Throwable current = ex;
+        while (current != null) {
+            String className = current.getClass().getName();
+            if (className.contains("ClientAbortException")) {
+                return true;
+            }
+            String message = current.getMessage();
+            if (message != null) {
+                String normalized = message.toLowerCase();
+                if (normalized.contains("broken pipe")
+                        || normalized.contains("connection reset by peer")
+                        || normalized.contains("forcibly closed by the remote host")) {
+                    return true;
+                }
+            }
+            current = current.getCause();
+        }
+        return false;
     }
 }
