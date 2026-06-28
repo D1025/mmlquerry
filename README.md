@@ -2,6 +2,8 @@
 
 Aplikacja do pobierania, indeksowania i przeszukiwania plików ESX biblioteki Mizar Mathematical Library. Backend pobiera wersjonowane dane z GitHub Releases, zapisuje źródłowe pliki XML w MinIO, indeksuje ich strukturę w PostgreSQL i udostępnia REST API. Frontend zapewnia edytor własnego języka zapytań, tabelę wyników oraz panel administracyjny ingestu.
 
+> **Wersja demonstracyjna:** aplikacja jest dostępna pod adresem [https://159.89.106.226/](https://159.89.106.226/) do **31 lipca 2026 r. włącznie**.
+
 ## Jak działa system
 
 ```text
