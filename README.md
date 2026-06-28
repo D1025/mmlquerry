@@ -1,442 +1,359 @@
-# Mizar Stack - Architektura i Implementacja
+# Mizar ESX Query Workbench
 
-## 🎯 Cel Projektu
+Aplikacja do pobierania, indeksowania i przeszukiwania plików ESX biblioteki Mizar Mathematical Library. Backend pobiera wersjonowane dane z GitHub Releases, zapisuje źródłowe pliki XML w MinIO, indeksuje ich strukturę w PostgreSQL i udostępnia REST API. Frontend zapewnia edytor własnego języka zapytań, tabelę wyników oraz panel administracyjny ingestu.
 
-**Mizar Stack** to platforma do:
-1. Pobierania artykułów Mizara z GitHub Releases
-2. Przechowywania ich w MinIO (S3-compatible object storage)
-3. Parsowania XML (ESX format) i indeksowania do PostgreSQL
-4. Queryowania i analizowania struktury biblioteki Mizara
+## Jak działa system
 
-## 🏗️ Architektura
-
-```
-GitHub Releases (Mizar ESX files)
-    ↓ (download + extract)
-MinIO / S3 (storage)
-    ↓ (parse + map)
-PostgreSQL (mizar_schema)
-    ↓ (query + analyze)
-REST API (/ingest, /query, /search)
-```
-
-## 📦 Komponenty
-
-### 1. IngestService (ingest/)
-- **Funkcja**: Pobieranie z GitHub, upload do S3, indeksowanie do BD
-- **Główne metody**:
-  - `downloadLatestReleaseToS3()` - Download release z GitHub
-  - `indexS3Prefix(String prefix)` - Indeks plików z S3
-  - `downloadAndIndex()` - Pełny pipeline
-
-### 2. EsxMmlMapperService (ingest/)
-- **Funkcja**: Parsowanie XML (ESX) i mapowanie do schematu BD
-- **Podejście**: SAX Reader (streaming) dla oszczędzania pamięci
-- **Output**: Tabele mizar_schema (article, mml_item, constructor, notation, ...)
-
-### 3. XmlProcessingService (ingest/)
-- **Funkcja**: Wstępna obróbka XML
-- **Główne metody**:
-  - `validateXml(byte[])`
-  - `extractMetadata(byte[])`
-  - `preprocessXml(byte[])`
-
-### 4. QueryEvaluationService (query/eval/)
-- **Funkcja**: Ewaluacja parsed query AST
-- **Wzorzec**: Visitor pattern na QueryNode AST
-
-### 5. QueryParser (query/parser/)
-- **Funkcja**: Parsowanie string query do AST
-- **Narzędzie**: ANTLR4 (grammar: MmlQuery.g4)
-
-### 6. QueryProcessingPipeline (query/integration/)
-- **Funkcja**: End-to-end query execution z profiling
-
-## 🗄️ Schema Bazy Danych
-
-Główne tabele:
-
-```sql
-article              -- Artykuł (kolekcja mml_items)
-mml_item             -- Element biblioteki (konstruktor, twierdzenie, itp.)
-constructor          -- Konstruktor (subtype mml_item)
-notation             -- Notacja (subtype mml_item)
-statement            -- Twierdzenie/Definicja (subtype mml_item)
-registration         -- Rejestracja (subtype mml_item)
-symbol               -- Symbol tekstowy
-format               -- Format notacji
-item_constructor_ref -- Referencje między elementami
-notation_symbol      -- Mapowanie notation → symbols
-notation_constructor -- Mapowanie notation → constructors
-constructor_definition -- Definicje konstruktorów
+```text
+GitHub Releases
+      |
+      | download plików .esx
+      v
+MinIO / S3
+      |
+      | parsowanie i indeksowanie XML
+      v
+PostgreSQL
+      |
+      | REST API + MML Query DSL
+      v
+React Query Workbench
 ```
 
-**Pełna dokumentacja**: `MAPOWANIE_ESX_BD.md`
+Najważniejsze możliwości:
 
-## 🚀 Uruchomienie
+- pobieranie najnowszego release'u ESX z repozytorium GitHub,
+- trwałe przechowywanie plików w storage zgodnym z S3,
+- indeksowanie artykułów, elementów MML i całej struktury węzłów XML,
+- przeszukiwanie twierdzeń, definicji, statements, rejestracji i symboli,
+- filtrowanie po nazwach węzłów, atrybutach, ścieżkach XML, liczbach i `spelling`,
+- wersjonowanie wyników według tagu release'u,
+- panel administratora do uruchamiania downloadu, indeksowania i pełnego ingestu.
 
-Szczegolowy runbook pod Linux jest w `DEPLOY_LINUX.md`. Ponizej masz skrocona wersje dla 3 scenariuszy.
+## Technologie
 
-### Wymagania
+| Obszar | Narzędzia |
+|---|---|
+| Backend | Java 17, Spring Boot 3.5.7, Gradle, Spring Web, Spring Data JPA, JdbcClient |
+| Parser zapytań | ANTLR 4.13, własna gramatyka MML Query |
+| Dane | PostgreSQL 16, Flyway, MinIO/S3 |
+| XML | SAX, dom4j, Woodstox, Jackson XML |
+| Frontend | React 19, TypeScript 6, Vite 8, Redux Toolkit, Material UI 9 |
+| Deployment | Docker Compose, nginx 1.29, Certbot / Let's Encrypt |
+| Testy | JUnit 5, Spring Boot Test, H2, ESLint |
 
-- Docker + Docker Compose plugin
-- Java 17+ (backend)
-- Node.js 22+ (frontend dev mode)
+## Usługi Docker Compose
 
-### 1) Lokalnie (dev, bez publicznego HTTPS)
+Lokalnie nie trzeba uruchamiać całego stacka. Certbot jest potrzebny wyłącznie na publicznym serwerze, a frontend może działać bez kontenera przez Vite.
 
-Ten wariant jest najlepszy do codziennej pracy: backend + baza + storage w Dockerze, frontend w `npm run dev`.
+| Usługa | Rola | Lokalny dev | Serwer |
+|---|---|:---:|:---:|
+| `postgres` | baza danych i indeks zapytań | tak | tak |
+| `minio` | storage plików ESX | tak | tak |
+| `minio-init` | jednorazowe utworzenie bucketa | tak | tak |
+| `app` | backend Spring Boot | tak | tak |
+| `frontend` | build React + nginx | opcjonalnie | tak |
+| `certbot-init` | pierwszy certyfikat TLS | nie | tak |
+| `certbot-renew` | odnawianie certyfikatu | nie | tak |
+
+`postgres`, `minio`, `app` są wystawione lokalnie tylko na `127.0.0.1`. Publicznie porty `80` i `443` publikuje wyłącznie kontener `frontend`.
+
+## Struktura repozytorium
+
+```text
+.
+├── compose.yaml                 # definicja całego stacka
+├── .env.template               # szablon konfiguracji
+├── DEPLOY_LINUX.md             # rozszerzony runbook dla Linuxa
+├── PROJECT_CONTEXT.md          # szczegółowy opis kodu i architektury
+├── docs/
+│   └── MML_QUERY_LANGUAGE.md   # dokumentacja języka zapytań
+├── mizar-stack/                # backend Spring Boot
+│   ├── src/main/antlr4/        # gramatyka ANTLR
+│   ├── src/main/java/          # API, ingest, mapper i query engine
+│   └── src/main/resources/     # konfiguracja i migracje Flyway
+└── mml-querry-frontend/        # frontend React/Vite
+```
+
+Nazwa katalogu `mml-querry-frontend` zawiera historyczną literówkę i jest używana w komendach oraz konfiguracji Compose.
+
+## Konfiguracja
+
+Utwórz lokalny plik `.env` na podstawie szablonu:
+
+```powershell
+Copy-Item .env.template .env
+```
+
+Linux/macOS:
 
 ```bash
-# 1. Konfiguracja
 cp .env.template .env
+```
 
-# 2. Backend + infrastruktura (Docker)
-docker compose up -d --build postgres minio minio-init app
+Plik `.env` jest ignorowany przez Git. Przed uruchomieniem co najmniej sprawdź:
 
-# 3. Frontend DEV (drugi terminal)
+| Zmienna | Znaczenie |
+|---|---|
+| `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | dane bazy PostgreSQL |
+| `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD` | dane dostępowe MinIO |
+| `S3_BUCKET`, `S3_REGION` | bucket i region używane przez backend |
+| `GITHUB_REPO` | repozytorium `owner/name` z release'ami ESX |
+| `GITHUB_TOKEN` | opcjonalny token zwiększający limit GitHub API |
+| `ADMIN_PASSWORD` | hasło do panelu administratora i chronionego API |
+| `APP_CORS_ALLOWED_ORIGINS` | dozwolone originy wywołujące backend |
+| `LETSENCRYPT_TARGET`, `LETSENCRYPT_EMAIL` | publiczna domena/IP i e-mail Certbota |
+
+Główny, aktualnie używany przepływ ingestu działa przez GitHub Releases. Port backendu w Compose to `8080`; zmienna `APP_PORT` z szablonu nie zmienia obecnego mapowania portów.
+
+## Uruchomienie lokalne
+
+### Wariant zalecany: backend w Dockerze, frontend przez Vite
+
+Wymagania:
+
+- Docker Desktop albo Docker Engine z pluginem Compose,
+- Node.js 22 i npm,
+- Git.
+
+1. Skopiuj `.env.template` do `.env` i dostosuj konfigurację.
+
+2. Uruchom backend. Compose automatycznie dołączy jego zależności: PostgreSQL, MinIO i `minio-init`.
+
+```bash
+docker compose up -d --build app
+```
+
+3. W drugim terminalu uruchom frontend developerski:
+
+```bash
 cd mml-querry-frontend
 npm ci
-npm run dev -- --host 0.0.0.0 --port 5173
+npm run dev
 ```
 
 Adresy:
-- Frontend: `http://localhost:5173`
-- Backend API: `http://localhost:8080`
 
-Uwagi:
-- W trybie dev frontend uzywa `/api` i Vite proxy do `http://localhost:8080`, wiec lokalnie nie wpadasz w problemy CORS.
-- Gdy chcesz wymusic bezposredni adres API w dev, ustaw `VITE_DEV_ALLOW_ABSOLUTE_API=true`.
+| Element | Adres |
+|---|---|
+| Frontend | `http://localhost:5173` |
+| Backend API | `http://localhost:8080` |
+| Health check | `http://localhost:8080/actuator/health` |
+| MinIO API | `http://localhost:9000` |
+| MinIO Console | `http://localhost:9001` |
 
-### 2) Serwer bez domeny (HTTPS na publicznym IP)
+Vite przekazuje `/api/*` do `http://localhost:8080` i usuwa prefiks `/api`, dlatego nie trzeba ustawiać osobnego adresu API ani uruchamiać lokalnego nginx. Target proxy można zmienić przez `VITE_DEV_API_TARGET`.
 
-Uzywa certyfikatu Let's Encrypt dla IP (shortlived). Ustaw w `.env`:
+W tym wariancie działają tylko `postgres`, `minio`, zakończony kodem `0` kontener `minio-init` oraz `app`. Kontenery `frontend`, `certbot-init` i `certbot-renew` pozostają wyłączone.
 
-```env
-LETSENCRYPT_TARGET=159.89.106.226
-LETSENCRYPT_EMAIL=admin@example.com
-FRONTEND_API_BASE_URL=/api
-ADMIN_PASSWORD=changeme-admin
+### Wariant alternatywny: wszystko lokalnie w Dockerze
+
+Jeśli nie chcesz instalować Node.js, uruchom nginx razem z aplikacją, ale nadal pomiń Certbota:
+
+```bash
+docker compose up -d --build frontend
 ```
 
-Uruchom:
+Compose uruchomi `frontend`, `app` i wszystkie zależności backendu. Aplikacja będzie dostępna przez HTTP pod `http://localhost`. Lokalny HTTPS nie jest w tym wariancie konfigurowany.
+
+Nie używaj lokalnie samego `docker compose up`, jeśli nie potrzebujesz certyfikatu publicznego — ta komenda uruchamia również oba kontenery Certbota.
+
+### Przydatne komendy lokalne
+
+```bash
+docker compose ps
+docker compose logs -f app
+docker compose up -d --build app
+docker compose stop
+docker compose down
+```
+
+`docker compose down` usuwa kontenery i sieć, ale pozostawia dane w nazwanych wolumenach. Nie używaj `docker compose down -v`, jeśli chcesz zachować bazę, pliki MinIO i certyfikaty.
+
+## Uruchomienie na serwerze
+
+Pełny stack serwerowy obejmuje wszystkie usługi z `compose.yaml`: bazę, MinIO, backend, frontend nginx oraz oba procesy Certbota.
+
+### Wymagania
+
+- publiczny serwer Linux,
+- Docker Engine i Docker Compose plugin,
+- otwarte porty TCP `80` i `443` w firewallu systemowym i u dostawcy serwera,
+- dla domeny: rekord DNS `A` i opcjonalnie `AAAA` wskazujący na serwer.
+
+Szczegóły instalacji Dockera na Ubuntu/Debian znajdują się w [DEPLOY_LINUX.md](DEPLOY_LINUX.md).
+
+### 1. Pobranie i konfiguracja
+
+```bash
+git clone <URL_REPOZYTORIUM>
+cd Magisterka
+cp .env.template .env
+```
+
+Ustaw w `.env` unikalne, silne hasła i publiczny target:
+
+```env
+POSTGRES_PASSWORD=<silne-haslo-bazy>
+MINIO_ROOT_PASSWORD=<silne-haslo-minio>
+ADMIN_PASSWORD=<silne-haslo-administratora>
+
+LETSENCRYPT_TARGET=mizar.example.com
+LETSENCRYPT_EMAIL=admin@example.com
+FRONTEND_API_BASE_URL=/api
+APP_CORS_ALLOWED_ORIGINS=https://mizar.example.com
+```
+
+Dla wdrożenia bez domeny `LETSENCRYPT_TARGET` może wskazywać publiczny adres IP, zgodnie z konfiguracją Certbota w `compose.yaml`.
+
+### 2. Start pełnego stacka
 
 ```bash
 docker compose up -d --build
 ```
 
-Wymagane:
-- publiczny routing na ten IP,
-- otwarte porty `80/tcp` i `443/tcp`.
+Po starcie nginx najpierw udostępnia HTTP i katalog challenge ACME. `certbot-init` pobiera certyfikat, a frontend przełącza konfigurację na HTTPS i przekierowuje ruch z portu `80` na `443`. `certbot-renew` cyklicznie sprawdza odnowienie certyfikatu.
 
-### 3) Serwer z domena (HTTPS na domenie)
-
-1. Ustaw DNS:
-- rekord `A` (i opcjonalnie `AAAA`) domeny musi wskazywac na serwer.
-
-2. Ustaw `.env`:
-
-```env
-LETSENCRYPT_TARGET=mizar.twojadomena.pl
-LETSENCRYPT_EMAIL=admin@example.com
-FRONTEND_API_BASE_URL=/api
-ADMIN_PASSWORD=changeme-admin
-```
-
-3. Uruchom:
+### 3. Weryfikacja
 
 ```bash
+docker compose ps
+docker compose logs --no-log-prefix certbot-init
+docker compose logs --tail=200 app frontend
+curl -I http://mizar.example.com
+curl -I https://mizar.example.com
+```
+
+Jeśli certyfikat nie został wydany, najpierw sprawdź DNS i publiczną dostępność portu `80`, a następnie ponów inicjalizację:
+
+```bash
+docker compose run --rm certbot-init
+docker compose logs --no-log-prefix certbot-init
+```
+
+### 4. Aktualizacja i zatrzymanie
+
+```bash
+git pull
 docker compose up -d --build
 ```
 
-### Jak dziala HTTPS w compose
-
-- `frontend` (nginx) publikuje `80` i `443`,
-- backend `app` dziala tylko wewnetrz sieci dockera (`app:8080`),
-- `/api/*` jest proxy do backendu,
-- `certbot-init` wydaje pierwszy certyfikat,
-- `certbot-renew` odnawia certyfikat cyklicznie,
-- frontend sam przeladowuje nginx po zmianie certyfikatu.
-
-Uwaga: do czasu wydania certyfikatu `443` moze chwile zwracac `connection refused`, a `80` powinien dzialac od razu.
-
-### Panel admina
-
-- W naglowku frontendu dostepna jest zakladka `Admin`.
-- Haslo administratora ustawiasz po stronie backendu przez `ADMIN_PASSWORD` w `.env`.
-- Frontend hashuje wpisane haslo (SHA-256) i wysyla hash w naglowku `Authorization`.
-- Zabezpieczone endpointy:
-  - `/ingest/*`
-  - `/admin/*`
-- Z panelu admina mozna uruchomic:
-  - pobranie zasobow do S3,
-  - indeksowanie wskazanego prefixu S3,
-  - pelny ingest (download + index).
-- Logi postepu operacji sa odswiezane na zywo w panelu.
-
-### Application Properties
-
-```properties
-# PostgreSQL
-spring.datasource.url=jdbc:postgresql://localhost:5432/mizar
-spring.datasource.username=postgres
-spring.datasource.password=postgres
-
-# MinIO / S3
-app.s3.endpoint=http://localhost:9000
-app.s3.bucket=mizar-data
-aws.accessKeyId=minioadmin
-aws.secretAccessKey=minioadmin
-
-# GitHub
-app.github.repo=MizarProject/Mizar
-app.github.token=ghp_xxxx...  # Optional, dla vyššej rate limitu
-app.http.timeoutMs=15000
-```
-
-## 🔌 REST API
-
-### Ingest Endpoints
-
-#### Download Latest Release
-```bash
-POST /ingest/download
-
-Response:
-{
-  "tagName": "esx-mizar-8.1.11_5.68.1412",
-  "s3Prefix": "mizar-esx/releases/esx-mizar-8.1.11_5.68.1412",
-  "filesUploaded": 1234,
-  "bytesUploaded": 567890123,
-  "durationSeconds": 45
-}
-```
-
-#### Index from S3
-```bash
-POST /ingest/index?prefix=mizar-esx/releases/esx-mizar-8.1.11_5.68.1412/esx_mml
-
-Response:
-{
-  "runId": 1,
-  "filesSeen": 1234,
-  "filesProcessed": 1234,
-  "newVersions": 1234,
-  "filesFailed": 0,
-  "totalBytes": 567890123,
-  "durationSeconds": 120
-}
-```
-
-#### Full Ingest (Download + Index)
-```bash
-POST /ingest/full
-
-Response:
-{
-  "download": { ... },
-  "index": { ... }
-}
-```
-
-#### Latest Statistics
-```bash
-GET /ingest/stats/latest
-
-Response:
-{
-  "runId": 1,
-  "articlesProcessed": 1234,
-  "itemsIndexed": 567890,
-  "errors": 0,
-  "durationSeconds": 165
-}
-```
-
-### Query Endpoints (TODO)
+Zatrzymanie bez usuwania danych:
 
 ```bash
-POST /query/parse?q=list<constructors>
-POST /query/eval
-GET /search?article=XBOOLE_0&kind=func
+docker compose down
 ```
 
-## 📊 Mapowanie ESX → BD
+Dane PostgreSQL, MinIO i Let's Encrypt są przechowywane w nazwanych wolumenach Dockera.
 
-Proces mapowania jest dokumentowany w `MAPOWANIE_ESX_BD.md`:
+## Pierwsze użycie i ingest danych
 
-1. **Parsowanie** (SAX Reader)
-   - Text-Proper → article
-   - Item nodes → extrahowanie type/subtype
-   
-2. **Ekstrakcja** (heurystyki)
-   - Pattern nodes → constructor kind
-   - Symbols z attributes
-   - Referencje do innych konstruktorów
-   
-3. **Wstawianie** (do PostgreSQL)
-   - article → mml_item
-   - constructor/notation/statement/registration (subtypes)
-   - item_constructor_ref (referencje)
-   
-4. **Resolver** (2-phase)
-   - Phase 1: Wstawianie z pending refs
-   - Phase 2: Rozwiązywanie cross-article references
+Samo uruchomienie stacka tworzy schemat bazy przez Flyway, ale nie pobiera automatycznie biblioteki ESX. Ingest trzeba uruchomić z panelu administratora:
 
-## 🔍 Heurystyki Mapowania
+- lokalny Vite: `http://localhost:5173/#/admin`,
+- lokalny nginx: `http://localhost/#/admin`,
+- serwer: `https://<LETSENCRYPT_TARGET>/#/admin`.
 
-```java
-// Typ elementu
-if (xml.contains("notation")) → kind = "notation"
-else if (patterns exist) → kind = "constructor"
-else if (definition/statement) → kind = "statement"
-else if (registration) → kind = "registration"
+Zaloguj się wartością `ADMIN_PASSWORD` z `.env`. Panel pozwala uruchomić:
 
-// Podtyp
-if (Functor-Pattern) → subKind = "func"
-else if (Attribute-Pattern) → subKind = "attr"
-else if (Mode-Pattern) → subKind = "mode"
-// ... itd
+- **Download** — pobranie najnowszego release'u i zapis plików w MinIO,
+- **Index** — indeksowanie wskazanego prefiksu S3,
+- **Full ingest** — download i indeksowanie katalogu `esx_mml` w jednej operacji.
 
-// LibID
-libId = MMLId || absoluteconstrMMLId || ARTICLE:subKind NUMBER
-```
+Postęp operacji jest przesyłany do panelu przez Server-Sent Events. Pełny ingest może być zasobo- i czasochłonny, zależnie od rozmiaru release'u.
 
-## 📈 Wydajność
+## REST API
 
-### Optymalizacje
+W trybie lokalnym API jest dostępne bezpośrednio pod `http://localhost:8080`. Przez frontend nginx lub Vite używany jest prefiks `/api`, który proxy usuwa przed przekazaniem requestu do backendu.
 
-1. **SAX Streaming**: Nie ładuje całego dokumentu do RAM
-2. **Detaching**: `.detach()` elementy po przetworzeniu
-3. **Batch Inserts**: Grupowanie operacji DB
-4. **Indeksowanie**: Indeksy na `lib_id`, `text`, `kind`
+Najważniejsze endpointy:
 
-### Benchmarks (Szacunkowe)
+| Metoda i endpoint | Rola |
+|---|---|
+| `POST /query/execute` | wykonanie zapytania DSL z pagingiem, sortowaniem i wersją danych |
+| `GET /query/syntax` | obsługiwane operatory, nody, atrybuty i przykłady |
+| `GET /query/versions` | dostępne wersje zindeksowanych danych |
+| `GET /query/items/{itemId}/fragment` | pełniejszy fragment XML pobrany z S3 |
+| `POST /query/warmup` | rozgrzanie wybranych zapytań |
+| `POST /ingest/download` | download GitHub Release do S3; wymaga autoryzacji admina |
+| `POST /ingest/index?prefix=...` | indeksowanie prefiksu S3; wymaga autoryzacji admina |
+| `POST /ingest/full` | pełny ingest; wymaga autoryzacji admina |
+| `GET /ingest/stats/latest` | statystyki ostatniego indeksowania; wymaga autoryzacji admina |
+| `GET /admin/operations/stream` | status operacji administracyjnych przez SSE |
 
-- **Download** (1GB, 50Mbps): ~20s
-- **Parse & Index** (1000 files, ~1GB): ~5 min
-- **DB Queries**: <100ms (z indeksami)
-
-## 🛠️ Struktura Projektu
-
-```
-mizar-stack/
-├── src/main/java/mag/mizarstack/
-│   ├── ingest/
-│   │   ├── IngestService.java
-│   │   ├── EsxMmlMapperService.java
-│   │   └── XmlProcessingService.java
-│   ├── query/
-│   │   ├── ast/                 # Abstract Syntax Tree nodes
-│   │   ├── parser/              # QueryParser + AstBuilder
-│   │   ├── eval/                # QueryEvaluationService
-│   │   └── integration/         # QueryProcessingPipeline
-│   ├── entity/                  # JPA entities
-│   ├── dao/                     # Data Access Objects
-│   ├── config/                  # Spring configuration
-│   └── web/                     # REST Controllers
-├── src/main/antlr4/
-│   └── mag/mizarstack/query/
-│       └── MmlQuery.g4          # ANTLR Grammar
-├── src/main/resources/
-│   ├── application.properties
-│   └── db/migration/            # Flyway migrations
-└── build.gradle
-```
-
-## 📝 Migracje Bazy
-
-```
-V1__schema.sql          -- Dokumenty i wersjonowanie
-V2__ingest_run.sql      -- Tracking ingest runs
-V3__mizar_schema.sql    -- Schema mapowania Mizara (main)
-V4__mizar_views.sql     -- Views dla analytics
-```
-
-## 🔄 Workflow Ingestji
-
-```
-1. User: POST /ingest/full
-2. IngestService.downloadAndIndex()
-   a) downloadLatestReleaseToS3()
-      - Fetch https://api.github.com/repos/MizarProject/Mizar/releases/latest
-      - Download zipball
-      - Extract esx_mml/**/*.esx files
-      - Upload to S3 (mizar-esx/releases/{tag}/)
-   b) indexS3Prefix(s3Prefix)
-      - List all .esx files in S3 prefix
-      - For each file:
-        - Download from S3
-        - EsxMmlMapperService.processArticleXml()
-          * SAX parse XML
-          * Extract items (constructors, notations, etc.)
-          * Insert to BD (article, mml_item, constructor, ...)
-          * Collect pending references
-        - Resolve pending references
-      - Log statistics
-3. Response: FullIngestResult (download + index stats)
-```
-
-## 🧪 Testowanie
+Przykładowe wykonanie zapytania:
 
 ```bash
-# Unit tests
+curl -X POST http://localhost:8080/query/execute \
+  -H "Content-Type: application/json" \
+  -d '{"query":"list of theorem in ABCMIZ_0","page":0,"size":10}'
+```
+
+## MML Query DSL
+
+Język zapytań obsługuje między innymi:
+
+```text
+list of theorem in ABCMIZ_0
+
+list of definition
+| nodes Item where redefine true and has *[spelling='Noetherian']
+
+occurrences of symbols | filter('spelling=ali*')
+
+list of statement where proposition has negated adjective spelling 'empty'
+
+list of statement | wherege(proposition:numeralterm,3)
+
+list of statement | number >= 200
+```
+
+Aktualne typy `list of` to: `theorem`, `definition`, `statement`, `registration`, `symbol` i `all`. `list of constructor` nie jest obsługiwane przez bieżącą gramatykę. Część operatorów relacyjnych związanych z konstruktorami (`ref`, `occur`, `definition`, `notation` i podobne) pozostaje dla zgodności z danymi legacy i na świeżej bazie może zwracać puste wyniki.
+
+Pełniejszy opis składni znajduje się w [docs/MML_QUERY_LANGUAGE.md](docs/MML_QUERY_LANGUAGE.md). Ostatecznym źródłem prawdy jest gramatyka [MmlQuery.g4](mizar-stack/src/main/antlr4/mag/mizarstack/query/MmlQuery.g4).
+
+## Budowanie i testy
+
+Backend na Windows:
+
+```powershell
+cd mizar-stack
+.\gradlew.bat test
+.\gradlew.bat clean bootJar
+```
+
+Backend na Linux/macOS:
+
+```bash
+cd mizar-stack
 ./gradlew test
-
-# Integration tests (z BD)
-./gradlew integrationTest
-
-# Gradle build
-./gradlew build
-
-# Clean rebuild
-./gradlew clean build
+./gradlew clean bootJar
 ```
 
-## 📚 Dodatkowe Dokumenty
+Frontend:
 
-- **MAPOWANIE_ESX_BD.md** - Szczegółowe mapowanie, heurystyki, przykłady XML
-- **MmlQuery.g4** - ANTLR Grammar dla query language
-
-## 🚨 Troubleshooting
-
-### Build Fails: "ANTLR grammar not found"
 ```bash
-# Upewnij się że plik istnieje:
-ls -la src/main/antlr4/mag/mizarstack/query/MmlQuery.g4
-
-# Jeśli nie, grammar zostanie wygenerowana w dalszych krokach
+cd mml-querry-frontend
+npm ci
+npm run lint
+npm run build
 ```
 
-### MinIO Connection Error
-```bash
-# Sprawdzenie MinIO
-docker ps | grep minio
-curl http://localhost:9000/minio/health/live
+Pomocniczy `run-gradle.cmd` sprawdza rozwiązywanie zależności `jaxen` i `dom4j`, a następnie uruchamia czysty zestaw testów backendu.
 
-# Jeśli offline, restart:
-docker-compose restart minio
-```
+## Najczęstsze problemy
 
-### PostgreSQL Connection Error
-```bash
-# Sprawdzenie PostgreSQL
-docker ps | grep postgres
-psql -h localhost -U postgres -c "SELECT version();"
+- **`minio-init` ma status `Exited (0)`** — to poprawne; kontener ma tylko utworzyć bucket i zakończyć pracę.
+- **Frontend lokalny nie łączy się z API** — sprawdź `docker compose ps`, logi `app` i wartość `VITE_DEV_API_TARGET`.
+- **Brak wyników zapytań** — po pierwszym starcie uruchom pełny ingest w panelu administratora i sprawdź jego logi.
+- **Backend nie startuje** — sprawdź `docker compose logs app postgres minio` oraz zgodność danych dostępowych w `.env`.
+- **HTTPS nie działa na serwerze** — sprawdź publiczny port `80`, DNS/target i logi `certbot-init`.
+- **Lokalny port `443` nie odpowiada** — bez certyfikatu nginx celowo działa tylko po HTTP.
 
-# Jeśli offline:
-docker-compose restart postgres
-```
+## Dokumentacja
 
-## 📄 Licencja
+- [PROJECT_CONTEXT.md](PROJECT_CONTEXT.md) — szczegółowy opis aktualnego kodu, modelu danych, API i ograniczeń,
+- [docs/MML_QUERY_LANGUAGE.md](docs/MML_QUERY_LANGUAGE.md) — składnia i operatory DSL,
+- [DEPLOY_LINUX.md](DEPLOY_LINUX.md) — rozszerzony runbook wdrożenia na Linuxie.
 
-Projekt stanowi część pracy magisterskiej.
-
-## 👤 Autor
-
-Magisterka: Mapowanie Struktur Biblioteki Mizar do Bazy Danych
-
----
-
-**Last Updated**: 2026-01-03
-
+Projekt jest rozwijany jako część pracy magisterskiej dotyczącej mapowania i przeszukiwania struktur biblioteki Mizar.
